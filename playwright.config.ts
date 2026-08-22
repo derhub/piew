@@ -1,0 +1,32 @@
+import { defineConfig, devices } from "@playwright/test";
+
+const PORT = 5910;
+
+export default defineConfig({
+  testDir: "./tests/e2e",
+  testMatch: /.*\.e2e\.ts/,
+  fullyParallel: false,
+  workers: 1,
+  reporter: process.env.CI ? "line" : [["list"]],
+  use: {
+    baseURL: `http://127.0.0.1:${PORT}`,
+    trace: "retain-on-failure",
+  },
+  projects: [
+    { name: "desktop", use: { ...devices["Desktop Chrome"] }, testIgnore: /.*phone\.e2e\.ts/ },
+    // Chromium with the phone's viewport and touch: WebKit would mean another
+    // browser download for a layout question neither engine answers differently.
+    {
+      name: "phone",
+      use: { ...devices["iPhone 13"], browserName: "chromium" },
+      testMatch: /.*phone\.e2e\.ts/,
+    },
+  ],
+  webServer: {
+    // The client is served from dist, so the bundle under test has to be built.
+    command: "bun run build && bun tests/e2e/server.ts",
+    url: `http://127.0.0.1:${PORT}/health`,
+    reuseExistingServer: false,
+    stdout: "pipe",
+  },
+});

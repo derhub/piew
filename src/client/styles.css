@@ -1,0 +1,365 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+@import "./typeset.css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/inter";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.375rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+}
+
+@theme inline {
+  --font-sans: "Inter Variable", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, monospace;
+
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: calc(var(--radius) - 1px);
+  --radius-lg: var(--radius);
+  --radius-xl: var(--radius);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --font-heading: var(--font-sans);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  /* The preset multiplies these out to pill-like corners (buttons landed at 18px);
+     keep the ramp flat so the whole UI sits between 4px and 10px. */
+  --radius-2xl: var(--radius);
+  --radius-3xl: calc(var(--radius) + 2px);
+  --radius-4xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+    font-feature-settings:
+      "rlig" 1,
+      "calt" 1;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+.typeset-docs {
+  --typeset-font-body: var(--font-sans);
+  --typeset-font-heading: var(--font-sans);
+  --typeset-font-mono: var(--font-mono);
+  --typeset-size: 1rem;
+  --typeset-leading: 1.7;
+  --typeset-flow: 1.25em;
+}
+
+/* typeset's own ramp compresses h2-h4 into a 16-20px band and drops h5/h6 to weight
+   500, so the heading levels stop reading as levels. Restate the scale. */
+.typeset-docs :is(h1, h2, h3, h4, h5, h6) {
+  font-weight: 600;
+  text-wrap: balance;
+}
+.typeset-docs h1 {
+  font-size: 1.875rem;
+}
+.typeset-docs h2 {
+  font-size: 1.5rem;
+}
+.typeset-docs h3 {
+  font-size: 1.25rem;
+}
+.typeset-docs h4 {
+  font-size: 1.0625rem;
+}
+.typeset-docs h5 {
+  font-size: 0.9375rem;
+}
+.typeset-docs h6 {
+  font-size: 0.875rem;
+}
+
+/* Section rhythm: the gap above a heading is what separates sections, so it steps
+   down by level. Fixed rem rather than em so the ramp does not drift with size. */
+.typeset-docs h2 {
+  margin-block-start: 4rem;
+}
+.typeset-docs h3 {
+  margin-block-start: 2.5rem;
+}
+.typeset-docs h4 {
+  margin-block-start: 2rem;
+}
+.typeset-docs :is(h5, h6) {
+  margin-block-start: 1.75rem;
+}
+
+/* 0.85em leaves inline code noticeably smaller than the text it sits in. */
+.typeset-docs :not(pre) > code {
+  font-size: 0.9em;
+}
+
+/* Header cells were only one weight step above body cells. */
+.typeset-docs th {
+  font-weight: 600;
+}
+
+/* Prose holds a ~72-character measure while figures, code, and tables use the
+   full column — narrowing everything to the measure clipped wide diagrams. */
+.typeset-docs > [data-annot]:not(:has(> table)),
+.typeset-docs > .markdown-alert {
+  max-width: 36rem;
+}
+
+/* Horizontal gutter for the document column. Held in a variable so the zoom control
+   can divide it back out — otherwise the padding scales too and eats the column. */
+.doc-column {
+  --doc-pad: 1.5rem;
+}
+@media (min-width: 48rem) {
+  .doc-column {
+    --doc-pad: 3.5rem;
+  }
+}
+
+/* Only the innermost hovered block reveals its gutter. `:hover` also matches every
+   ancestor block, so a descendant selector lit up every gutter inside the outer list. */
+[data-annot]:hover:not(:has([data-annot]:hover)) > .not-typeset > .annot-gutter,
+.annot-gutter:focus-visible {
+  opacity: 1;
+}
+
+/* A touch screen has no hover to reveal it with, so the gutter just stays out. */
+@media (hover: none) {
+  .annot-gutter {
+    opacity: 0.55;
+  }
+}
+
+/* A table's min-content width would otherwise force the whole layout wider. */
+.typeset-docs > [data-annot]:has(> table) {
+  overflow-x: auto;
+}
+
+/* `[data-annot]` wrappers sit between typeset's `heading + *` rule and its target. */
+.typeset [data-annot]:has(> :is(h1, h2, h3, h4, h5, h6)) + [data-annot] > * {
+  margin-block-start: 1em;
+}
+
+/* Shiki dual-theme tokens */
+.shiki,
+.shiki span {
+  color: var(--shiki-light);
+  background-color: transparent !important;
+}
+.dark .shiki,
+.dark .shiki span {
+  color: var(--shiki-dark);
+  background-color: transparent !important;
+}
+
+/* GitHub alert callouts */
+.markdown-alert {
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  margin: 1.25rem 0;
+  background-color: var(--muted);
+}
+.markdown-alert > :last-child {
+  margin-bottom: 0 !important;
+}
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.35rem;
+}
+.markdown-alert .markdown-alert-title svg {
+  width: 1rem;
+  height: 1rem;
+  fill: currentColor;
+}
+.markdown-alert.markdown-alert-note {
+  border-left-color: #3b82f6;
+  background-color: rgb(59 130 246 / 0.08);
+}
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: #3b82f6;
+}
+.markdown-alert.markdown-alert-tip {
+  border-left-color: #10b981;
+  background-color: rgb(16 185 129 / 0.08);
+}
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: #10b981;
+}
+.markdown-alert.markdown-alert-important {
+  border-left-color: #a855f7;
+  background-color: rgb(168 85 247 / 0.08);
+}
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: #a855f7;
+}
+.markdown-alert.markdown-alert-warning {
+  border-left-color: #f59e0b;
+  background-color: rgb(245 158 11 / 0.08);
+}
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: #f59e0b;
+}
+.markdown-alert.markdown-alert-caution {
+  border-left-color: #ef4444;
+  background-color: rgb(239 68 68 / 0.08);
+}
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: #ef4444;
+}
+
+/* KaTeX */
+.katex-display {
+  margin: 1.25rem 0 !important;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.5rem 0;
+}
+/* Jumping from the feedback chat: says which annotation was asked for. */
+@keyframes annot-focus {
+  from {
+    box-shadow: 0 0 0 2px var(--ring);
+  }
+  to {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+[data-annot-focus] {
+  border-radius: var(--radius);
+  animation: annot-focus 1.6s ease-out forwards;
+}
+
+/* Phone layout: the side panels stop taking width from the document and cover it
+   instead. Fixed, so the collapsed panel they live in cannot squeeze them. */
+@media (max-width: 767px) {
+  .piew-panel {
+    position: fixed;
+    inset-block: 0;
+    z-index: 40;
+    width: 82%;
+    box-shadow: 0 10px 30px rgb(0 0 0 / 0.35);
+  }
+
+  .piew-panel-start {
+    inset-inline-start: 0;
+  }
+
+  .piew-panel-end {
+    inset-inline-end: 0;
+  }
+
+  .piew-panel-away {
+    display: none;
+  }
+}

@@ -1,0 +1,134 @@
+import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { ReviewServer } from "../../src/server/server";
+import { resolveDiff } from "../../src/cli/git";
+import { gitTarget, targetKey } from "../../src/cli/paths";
+
+const FILE_COUNT = 40;
+
+function git(args: string[], cwd: string) {
+  const res = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (res.status !== 0) throw new Error(`git ${args.join(" ")}: ${res.stderr}`);
+  return res.stdout;
+}
+
+describe("Diff Session Integration", () => {
+  let server: ReviewServer;
+  let port: number;
+  let repo: string;
+  let target: string;
+
+  const post = (route: string, body: unknown) =>
+    fetch(`http://127.0.0.1:${port}${route}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  beforeAll(async () => {
+    repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "piew-diffsession-")));
+    git(["init", "-q", "-b", "main"], repo);
+    git(["config", "user.email", "test@example.com"], repo);
+    git(["config", "user.name", "test"], repo);
+    fs.mkdirSync(path.join(repo, "src"));
+
+    for (let i = 0; i < FILE_COUNT; i++) {
+      fs.writeFileSync(path.join(repo, "src", `file-${i}.ts`), `const value = ${i};\n`.repeat(200));
+    }
+    git(["add", "."], repo);
+    git(["commit", "-qm", "base"], repo);
+
+    for (let i = 0; i < FILE_COUNT; i++) {
+      fs.writeFileSync(
+        path.join(repo, "src", `file-${i}.ts`),
+        `const value = ${i + 1};\n`.repeat(200)
+      );
+    }
+    git(["add", "-A"], repo);
+    git(["commit", "-qm", "change"], repo);
+
+    target = gitTarget(repo, "HEAD~1..HEAD");
+    server = new ReviewServer();
+    port = await server.start(5898);
+  });
+
+  afterAll(() => {
+    server.stop();
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  const openDiff = async () => {
+    const resolved = resolveDiff("HEAD~1..HEAD", { cwd: repo });
+    return (await (await post("/api/session", { diff: resolved })).json()) as {
+      sessionId: string;
+      entryKey: string;
+      pageKeys: string[];
+    };
+  };
+
+  it("carries no blob through the CLI payload", () => {
+    const resolved = resolveDiff("HEAD~1..HEAD", { cwd: repo });
+    const serialized = JSON.stringify(resolved);
+
+    expect(resolved.files).toHaveLength(FILE_COUNT);
+    expect(serialized).not.toContain("const value =");
+  });
+
+  it("returns no page content from the session route regardless of range size", async () => {
+    const created = await openDiff();
+    const session = await (
+      await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}`)
+    ).json();
+
+    expect(session.pageKeys).toHaveLength(FILE_COUNT);
+    for (const page of Object.values(session.pages) as any[]) {
+      expect(page.content).toBeUndefined();
+      expect(page.diff).toBeUndefined();
+      expect(page.filename).toMatch(/^src\/file-\d+\.ts$/);
+    }
+  });
+
+  it("serves both blob sides from the per-page route", async () => {
+    const created = await openDiff();
+    const key = created.pageKeys.find((k) => {
+      const p = server.store.pages.get(k);
+      return p?.filename === "src/file-0.ts";
+    })!;
+
+    const page = await (await fetch(`http://127.0.0.1:${port}/api/page/${key}`)).json();
+    expect(page.kind).toBe("diff");
+    expect(page.diff.oldContent).toContain("const value = 0;");
+    expect(page.diff.newContent).toContain("const value = 1;");
+  });
+
+  it("polls a diff session by its git target rather than a path", async () => {
+    const created = await openDiff();
+    expect(created.entryKey).toBe(targetKey(target));
+
+    await post(`/api/page/${created.pageKeys[0]}/comment`, {
+      kind: "line_range",
+      startLine: 3,
+      endLine: 3,
+      feedback: "narrow this",
+      side: "new",
+    });
+    await post("/api/send", { sessionId: created.sessionId });
+
+    const batch = await (
+      await fetch(`http://127.0.0.1:${port}/api/poll?target=${encodeURIComponent(target)}`)
+    ).json();
+
+    expect(batch.status).toBe("feedback");
+    expect(batch.pages[0].comments[0].feedback).toBe("narrow this");
+  });
+
+  it("keeps both the pending batch and the diff pages across a restart", () => {
+    const restarted = new ReviewServer();
+
+    expect(restarted.store.getBatch(targetKey(target))).toBeDefined();
+    expect([...restarted.store.pages.values()].some((p) => p.kind === "diff")).toBe(true);
+  });
+});
