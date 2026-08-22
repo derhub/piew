@@ -1,6 +1,6 @@
 {
   "name": "piew",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Portable review — open Markdown, source files, and Git diffs in the browser, comment on exact lines, and send the batch back to your coding agent.",
   "keywords": [
     "agent",
