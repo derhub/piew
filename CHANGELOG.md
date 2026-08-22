@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/derhub/piew/compare/v0.1.0...v0.1.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* publish under the [@derhub](https://github.com/derhub) scope ([c07541e](https://github.com/derhub/piew/commit/c07541ee8a64e4b16fa61ee6a00d70c92268b543))
+* publish under the [@derhub](https://github.com/derhub) scope ([8c52935](https://github.com/derhub/piew/commit/8c5293564f295644a234a64b8c8831e9bb4a86fc))
+
 ## 0.1.0 (2026-08-22)
 
 
