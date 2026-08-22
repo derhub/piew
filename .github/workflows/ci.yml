@@ -15,6 +15,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
@@ -22,7 +23,7 @@ jobs:
       - run: bun run fmt:check
       - run: bun run lint
       - run: bun test tests/unit tests/integration
-      - run: bunx playwright install --with-deps chromium
+      - run: bunx playwright install --with-deps --only-shell chromium
       - run: bun run test:e2e
       - uses: actions/upload-artifact@v7
         if: failure()

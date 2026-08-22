@@ -7,7 +7,9 @@ export default defineConfig({
   testMatch: /.*\.e2e\.ts/,
   fullyParallel: false,
   workers: 1,
-  reporter: process.env.CI ? "line" : [["list"]],
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : [["list"]],
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,
     trace: "retain-on-failure",
