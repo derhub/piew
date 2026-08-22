@@ -3,6 +3,12 @@
 ## [0.1.2](https://github.com/derhub/piew/compare/v0.1.1...v0.1.2) (2026-08-22)
 
 
+### Features
+
+* **toc:** toggle the on-this-page nav ([d3c81f1](https://github.com/derhub/piew/commit/d3c81f1f7c38478b2b98bc8dd917c5766fd67039))
+* **toc:** toggle the on-this-page nav ([c1e229f](https://github.com/derhub/piew/commit/c1e229fbaee9fbc90154526705714b6044b8a0cb))
+
+
 ### CI
 
 * allow manual release-please runs ([9c6fa65](https://github.com/derhub/piew/commit/9c6fa657438d6e7b9d999d97dafac0bee0ed2567))
