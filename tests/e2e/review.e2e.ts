@@ -226,6 +226,32 @@ test.describe("chat width", () => {
   });
 });
 
+test.describe("on this page", () => {
+  test("the nav collapses to its icon and comes back", async ({ page, request }) => {
+    await openReview(page, await openSession(request));
+
+    const entry = page.getByRole("button", { name: "Second section" });
+    await expect(entry).toBeVisible();
+
+    await page.getByLabel("Hide table of contents").click();
+    await expect(entry).toBeHidden();
+
+    await page.getByLabel("Show table of contents").click();
+    await expect(entry).toBeVisible();
+  });
+
+  test("a collapsed nav is still collapsed on the next visit", async ({ page, request }) => {
+    const session = await openSession(request);
+    await openReview(page, session);
+
+    await page.getByLabel("Hide table of contents").click();
+    await page.reload();
+
+    await expect(page.getByLabel("Show table of contents")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Second section" })).toBeHidden();
+  });
+});
+
 test.describe("landing page", () => {
   test("lists an open review and opens it", async ({ page, request }) => {
     const session = await openSession(request);

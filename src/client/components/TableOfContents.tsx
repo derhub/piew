@@ -1,6 +1,15 @@
 import React from "react";
+import { PanelRight } from "lucide-react";
+import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
 import { extractHeadings, type HeadingItem } from "~/lib/headings";
+
+const HIDDEN_KEY = "piew:toc-hidden";
+
+/** Wanting the nav out of the way is a habit, not a per-document choice, so it sticks. */
+function prefersHidden(): boolean {
+  return localStorage.getItem(HIDDEN_KEY) === "1";
+}
 
 /** Marks the last heading scrolled past, like the shadcn docs "On This Page" nav. */
 function useActiveHeading(ids: string[]) {
@@ -44,8 +53,14 @@ export function TableOfContents({ markdown }: { markdown: string }) {
   const headings = React.useMemo(() => extractHeadings(markdown), [markdown]);
   const ids = React.useMemo(() => headings.map((h) => h.id), [headings]);
   const active = useActiveHeading(ids);
+  const [hidden, setHidden] = React.useState(prefersHidden);
 
   if (headings.length === 0) return null;
+
+  const toggle = () => {
+    localStorage.setItem(HIDDEN_KEY, hidden ? "0" : "1");
+    setHidden(!hidden);
+  };
 
   const scrollTo = (item: HeadingItem) => {
     const el =
@@ -55,9 +70,26 @@ export function TableOfContents({ markdown }: { markdown: string }) {
   };
 
   return (
-    <aside className="sticky top-12 hidden h-[calc(100dvh-3rem)] w-60 shrink-0 overflow-y-auto py-10 pr-6 xl:block">
-      <p className="text-muted-foreground mb-3 pl-4 text-xs font-medium">On This Page</p>
-      <nav className="flex flex-col">
+    <aside
+      className={cn(
+        "sticky top-12 hidden h-[calc(100dvh-3rem)] shrink-0 overflow-y-auto py-10 xl:block",
+        hidden ? "w-12 pr-2" : "w-60 pr-6"
+      )}
+    >
+      <div className={cn("mb-3 flex items-center", hidden ? "justify-center" : "gap-1 pl-4")}>
+        {!hidden && (
+          <p className="text-muted-foreground flex-1 truncate text-xs font-medium">On This Page</p>
+        )}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={hidden ? "Show table of contents" : "Hide table of contents"}
+          onClick={toggle}
+        >
+          <PanelRight />
+        </Button>
+      </div>
+      <nav className={cn("flex-col", hidden ? "hidden" : "flex")}>
         {headings.map((heading) => (
           <button
             key={`${heading.id}-${heading.line}`}
