@@ -25,6 +25,12 @@ Install the CLI:
 Install the skill for Claude Code, Codex, and Antigravity with [skills](https://github.com/vercel-labs/skills):
 
 ```sh
+npx skills add derhub/piew
+```
+
+From a local checkout:
+
+```sh
 npx skills add ./skills/piew
 ```
 
