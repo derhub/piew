@@ -35,24 +35,24 @@ npx skills add ./skills/piew
 Open Markdown or source files:
 
 ```sh
-bunx piew path/to/spec.md
-bunx piew path/to/spec.md path/to/api.md
-bunx piew src/server/auth.ts
+bunx @derhub/piew path/to/spec.md
+bunx @derhub/piew path/to/spec.md path/to/api.md
+bunx @derhub/piew src/server/auth.ts
 ```
 
 Open a Git diff:
 
 ```sh
-bunx piew diff main..feature
-bunx piew diff --staged
-bunx piew diff
+bunx @derhub/piew diff main..feature
+bunx @derhub/piew diff --staged
+bunx @derhub/piew diff
 ```
 
 Wait for a submitted feedback batch:
 
 ```sh
-bunx piew path/to/spec.md --wait --timeout 600
-bunx piew poll path/to/spec.md --timeout 600
+bunx @derhub/piew path/to/spec.md --wait --timeout 600
+bunx @derhub/piew poll path/to/spec.md --timeout 600
 ```
 
 The full agent workflow and feedback contract live in
