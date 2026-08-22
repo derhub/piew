@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/derhub/piew/compare/v0.1.1...v0.1.2) (2026-08-22)
+
+
+### CI
+
+* allow manual release-please runs ([9c6fa65](https://github.com/derhub/piew/commit/9c6fa657438d6e7b9d999d97dafac0bee0ed2567))
+
 ## [0.1.1](https://github.com/derhub/piew/compare/v0.1.0...v0.1.1) (2026-08-22)
 
 
