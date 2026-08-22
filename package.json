@@ -3,25 +3,24 @@
   "version": "1.0.0",
   "description": "Portable review — open Markdown, source files, and Git diffs in the browser, comment on exact lines, and send the batch back to your coding agent.",
   "keywords": [
-    "review",
-    "markdown",
-    "diff",
-    "code-review",
     "agent",
-    "cli"
+    "cli",
+    "code-review",
+    "diff",
+    "markdown",
+    "review"
   ],
   "homepage": "https://github.com/derhub/piew#readme",
   "bugs": "https://github.com/derhub/piew/issues",
+  "license": "MIT",
+  "author": "derhub",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/derhub/piew.git"
   },
-  "license": "MIT",
-  "author": "derhub",
   "bin": {
     "piew": "./bin/piew.ts"
   },
-  "type": "module",
   "files": [
     "bin",
     "src/cli",
@@ -29,9 +28,7 @@
     "src/server",
     "dist"
   ],
-  "engines": {
-    "bun": ">=1.2.0"
-  },
+  "type": "module",
   "publishConfig": {
     "access": "public"
   },
@@ -93,5 +90,8 @@
     "unified": "^11.0.5",
     "unist-util-visit": "^5.1.0",
     "vite": "^8.2.1"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
   }
 }
