@@ -16,11 +16,7 @@ exact lines, suggest changes, and send everything back to the agent.
 
 ## Install
 
-Install the CLI:
-
-```sh
-./install.sh
-```
+No install needed for the CLI — run it with `bunx`.
 
 Install the skill for Claude Code, Codex, and Antigravity with [skills](https://github.com/vercel-labs/skills):
 
@@ -39,24 +35,24 @@ npx skills add ./skills/piew
 Open Markdown or source files:
 
 ```sh
-piew path/to/spec.md
-piew path/to/spec.md path/to/api.md
-piew src/server/auth.ts
+bunx piew path/to/spec.md
+bunx piew path/to/spec.md path/to/api.md
+bunx piew src/server/auth.ts
 ```
 
 Open a Git diff:
 
 ```sh
-piew diff main..feature
-piew diff --staged
-piew diff
+bunx piew diff main..feature
+bunx piew diff --staged
+bunx piew diff
 ```
 
 Wait for a submitted feedback batch:
 
 ```sh
-piew path/to/spec.md --wait --timeout 600
-piew poll path/to/spec.md --timeout 600
+bunx piew path/to/spec.md --wait --timeout 600
+bunx piew poll path/to/spec.md --timeout 600
 ```
 
 The full agent workflow and feedback contract live in
