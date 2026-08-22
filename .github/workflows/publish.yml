@@ -5,6 +5,10 @@ on:
     inputs:
       tag:
         description: "npm dist-tag"
+        type: choice
+        options:
+          - latest
+          - next
         default: latest
 
 permissions:
@@ -14,7 +18,14 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: npm-publish
     steps:
+      - name: Refuse to publish from an unreleased ref
+        run: |
+          case "$GITHUB_REF" in
+            refs/heads/main | refs/tags/v*) ;;
+            *) echo "::error::refusing to publish from $GITHUB_REF"; exit 1 ;;
+          esac
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v6
@@ -25,4 +36,6 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun test tests/unit tests/integration
-      - run: npm publish --ignore-scripts --tag ${{ inputs.tag }}
+      - run: npm publish --ignore-scripts --tag "$NPM_TAG"
+        env:
+          NPM_TAG: ${{ inputs.tag }}
