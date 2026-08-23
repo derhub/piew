@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/derhub/piew/compare/v0.1.2...v0.2.0) (2026-08-23)
+
+
+### Features
+
+* **markdown:** support collapsible details sections ([fcf1f18](https://github.com/derhub/piew/commit/fcf1f18cb7e7188abc8451d3605c3db9be96486f))
+* **markdown:** support collapsible details sections ([036dfa8](https://github.com/derhub/piew/commit/036dfa880586faa077b590cece3805dc214e018e))
+
 ## [0.1.2](https://github.com/derhub/piew/compare/v0.1.1...v0.1.2) (2026-08-22)
 
 
