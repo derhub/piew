@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import remarkFrontmatter from "remark-frontmatter";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
 import { remarkAlert } from "remark-github-blockquote-alert";
 import { remarkSourceLine } from "~/lib/remark-source-line";
 import { nodeText, slugify } from "~/lib/slug";
@@ -203,7 +204,7 @@ function LinkNode({ href, isExternal, children, ...props }: any) {
 }
 
 const remarkPlugins = [remarkGfm, remarkFrontmatter, remarkMath, remarkAlert, remarkSourceLine];
-const rehypePlugins = [rehypeKatex];
+const rehypePlugins = [rehypeRaw, rehypeKatex];
 
 export function MarkdownViewer({
   content,
