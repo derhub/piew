@@ -131,7 +131,7 @@ const components = {
   h4: (p: any) => <Heading level={4} {...p} />,
   p({ node, children, ...props }: any) {
     return (
-      <AnnotatedBlock line={node?.position?.start?.line}>
+      <AnnotatedBlock line={node?.position?.start?.line} threadAside>
         <p {...props}>{children}</p>
       </AnnotatedBlock>
     );

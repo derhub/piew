@@ -59,7 +59,7 @@ const OwnerLineContext = React.createContext<number | null>(null);
 function Gutter({ line, offset }: { line: number; offset: string }) {
   const api = useAnnotation();
   return (
-    <span data-not-typeset className="not-typeset">
+    <span data-not-typeset className="not-typeset contents">
       <button
         type="button"
         aria-label={`Annotate line ${line}`}
@@ -75,14 +75,17 @@ function Gutter({ line, offset }: { line: number; offset: string }) {
 /** Existing annotations plus the composer, rendered in flow under the block. */
 export function Thread({ line }: { line: number }) {
   const api = useAnnotation();
-  const comments = api.comments.filter((c) => c.startLine === line);
-  const edits = api.edits.filter((e) => e.startLine === line);
+  const comments = api.comments.filter((c) => !c.orphaned && c.startLine === line);
+  const edits = api.edits.filter((e) => !e.orphaned && e.startLine === line);
   const isOpen = api.openLine === line;
 
   if (comments.length === 0 && edits.length === 0 && !isOpen) return null;
 
   return (
-    <div data-not-typeset className="not-typeset mt-3 flex flex-col gap-2">
+    <div
+      data-not-typeset
+      className="annotation-thread not-typeset mt-3 flex min-w-0 flex-col gap-2"
+    >
       {comments.map((c) => (
         <AnnotationCard
           key={c.id}
@@ -138,10 +141,12 @@ export function Thread({ line }: { line: number }) {
 export function AnnotatedBlock({
   line,
   id,
+  threadAside,
   children,
 }: {
   line?: number;
   id?: string;
+  threadAside?: boolean;
   children: React.ReactNode;
 }) {
   const ownerLine = React.useContext(OwnerLineContext);
@@ -150,7 +155,12 @@ export function AnnotatedBlock({
   if (!line || ownerLine === line) return <>{children}</>;
 
   return (
-    <div data-annot id={id} data-line-start={line} className="relative">
+    <div
+      data-annot
+      id={id}
+      data-line-start={line}
+      className={threadAside ? "annotated-aside relative" : "relative"}
+    >
       <Gutter line={line} offset="-left-9" />
       <OwnerLineContext.Provider value={line}>{children}</OwnerLineContext.Provider>
       <Thread line={line} />
@@ -228,17 +238,72 @@ function AnnotationCard({
   return (
     <div
       data-annot-id={annotId}
-      className="bg-card text-card-foreground rounded-lg border text-sm shadow-xs"
+      className="group bg-muted/20 text-card-foreground border-border/60 rounded-md border text-sm"
     >
-      <div className="text-muted-foreground flex items-center justify-between gap-2 border-b px-3 py-1.5 text-xs">
-        <span className="flex items-center gap-1.5 font-medium">
+      <div className="flex items-start gap-2 px-2.5 py-2">
+        <span className="text-muted-foreground mt-0.5 shrink-0">
           <MessageSquare className="size-3" />
-          {label}
+          <span className="sr-only">{label}</span>
         </span>
+
+        <div
+          className={`min-w-0 flex-1 ${!sent && !editing ? "cursor-text" : ""}`}
+          onDoubleClick={!sent && !editing ? startEditing : undefined}
+        >
+          {editing ? (
+            <div className="flex flex-col gap-2">
+              <Textarea
+                autoFocus
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) save();
+                  if (e.key === "Escape") setEditing(false);
+                }}
+                className={`max-h-64 min-h-20 text-sm ${mono ? "font-mono" : ""}`}
+              />
+              <div className="flex items-center justify-end gap-2">
+                <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={save}>
+                  Save
+                </Button>
+              </div>
+            </div>
+          ) : (
+            children
+          )}
+
+          {quote && (
+            <blockquote className="text-muted-foreground mt-1.5 max-h-9 overflow-hidden border-l pl-2 font-mono text-xs">
+              {quote}
+            </blockquote>
+          )}
+
+          {replies?.length ? (
+            <div className="mt-2 flex flex-col gap-1.5 border-t pt-2">
+              {replies.map((reply, i) => (
+                <p key={i} className="text-muted-foreground text-xs whitespace-pre-wrap">
+                  <span className="text-foreground font-medium">
+                    {reply.from === "agent" ? "Agent" : "You"}:{" "}
+                  </span>
+                  {reply.text}
+                </p>
+              ))}
+              {/* Only a question is still live; the other verdicts end the exchange. */}
+              {status === "question" && onReply && (
+                <Button variant="secondary" size="xs" className="self-start" onClick={onReply}>
+                  Reply
+                </Button>
+              )}
+            </div>
+          ) : null}
+        </div>
 
         {/* Once the agent holds it, the record is theirs; only unsent work is editable. */}
         {sent ? (
-          <span className="flex items-center gap-1.5">
+          <span className="text-muted-foreground flex shrink-0 items-center gap-1.5 text-xs">
             {status && status !== "open" ? (
               <span
                 className={`rounded-md px-1.5 py-0.5 text-[10px] font-medium ${STATUS_STYLE[status]}`}
@@ -253,7 +318,7 @@ function AnnotationCard({
             )}
           </span>
         ) : (
-          <span className="flex items-center">
+          <span className="flex shrink-0 items-center opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
             <Button
               variant="ghost"
               size="icon-xs"
@@ -273,57 +338,6 @@ function AnnotationCard({
             </Button>
           </span>
         )}
-      </div>
-      <div className="px-3 py-2">
-        {quote && (
-          <blockquote className="text-muted-foreground mb-2 border-l-2 pl-2 font-mono text-xs">
-            {quote}
-          </blockquote>
-        )}
-
-        {editing ? (
-          <div className="flex flex-col gap-2">
-            <Textarea
-              autoFocus
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) save();
-                if (e.key === "Escape") setEditing(false);
-              }}
-              className={`max-h-64 min-h-20 text-sm ${mono ? "font-mono" : ""}`}
-            />
-            <div className="flex items-center justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>
-                Cancel
-              </Button>
-              <Button size="sm" onClick={save}>
-                Save
-              </Button>
-            </div>
-          </div>
-        ) : (
-          children
-        )}
-
-        {replies?.length ? (
-          <div className="mt-2 flex flex-col gap-1.5 border-t pt-2">
-            {replies.map((reply, i) => (
-              <p key={i} className="text-muted-foreground text-xs whitespace-pre-wrap">
-                <span className="text-foreground font-medium">
-                  {reply.from === "agent" ? "Agent" : "You"}:{" "}
-                </span>
-                {reply.text}
-              </p>
-            ))}
-            {/* Only a question is still live; the other verdicts end the exchange. */}
-            {status === "question" && onReply && (
-              <Button variant="secondary" size="xs" className="self-start" onClick={onReply}>
-                Reply
-              </Button>
-            )}
-          </div>
-        ) : null}
       </div>
     </div>
   );

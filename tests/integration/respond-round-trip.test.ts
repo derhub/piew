@@ -49,6 +49,17 @@ describe("Respond round trip", () => {
 
   const sessionState = (id: string) => api(`/api/session/${id}`).then((r) => r.json());
 
+  async function waitForComment(sessionId: string, pageKey: string, commentId: string) {
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      const state = await sessionState(sessionId);
+      const comment = state.pages[pageKey].comments.find((item: any) => item.id === commentId);
+      if (comment?.startLine === 5 || comment?.orphaned) return comment;
+      await Bun.sleep(25);
+    }
+    throw new Error("Timed out waiting for the comment anchor to refresh");
+  }
+
   it("records the agent's verdict on a delivered comment", async () => {
     const { session, commentId } = await deliveredComment("tighten this");
 
@@ -120,5 +131,81 @@ describe("Respond round trip", () => {
     expect(turn.from).toBe("agent");
     expect(turn.note).toBe("one open question");
     expect(turn.items[0]).toMatchObject({ id: commentId, status: "question" });
+  });
+
+  it("moves a line comment with its unique quote", async () => {
+    fs.writeFileSync(file, "# Doc\n\nContent.\n\nMore.", "utf8");
+    const session = await api("/api/session", {
+      method: "POST",
+      body: JSON.stringify({ files: [file] }),
+    }).then((r) => r.json());
+    const pageKey = session.pageKeys[0];
+    const { comment } = await api(`/api/page/${pageKey}/comment`, {
+      method: "POST",
+      body: JSON.stringify({ startLine: 3, endLine: 3, quote: "Content.", feedback: "move me" }),
+    }).then((r) => r.json());
+    await api("/api/send", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: session.sessionId }),
+    });
+
+    fs.writeFileSync(file, "# Doc\n\nNew line.\n\nContent.\n\nMore.", "utf8");
+    await waitForComment(session.sessionId, pageKey, comment.id);
+    await api("/api/respond", {
+      method: "POST",
+      body: JSON.stringify({
+        target: file,
+        items: [{ id: comment.id, status: "applied", note: "moved it" }],
+      }),
+    });
+
+    const state = await sessionState(session.sessionId);
+    expect({
+      comment: state.pages[pageKey].comments.find((item: any) => item.id === comment.id),
+      userTurn: state.turns.at(-2).items[0],
+      agentTurn: state.turns.at(-1).items[0],
+    }).toMatchObject({
+      comment: { startLine: 5, endLine: 5, orphaned: false },
+      userTurn: { startLine: 5, endLine: 5, orphaned: false },
+      agentTurn: { startLine: 5, endLine: 5, orphaned: false },
+    });
+  });
+
+  it("marks a line comment unplaced when its quote disappears", async () => {
+    fs.writeFileSync(file, "# Doc\n\nContent.\n\nMore.", "utf8");
+    const session = await api("/api/session", {
+      method: "POST",
+      body: JSON.stringify({ files: [file] }),
+    }).then((r) => r.json());
+    const pageKey = session.pageKeys[0];
+    const { comment } = await api(`/api/page/${pageKey}/comment`, {
+      method: "POST",
+      body: JSON.stringify({ startLine: 3, endLine: 3, quote: "Content.", feedback: "keep me" }),
+    }).then((r) => r.json());
+    await api("/api/send", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: session.sessionId }),
+    });
+
+    fs.writeFileSync(file, "# Doc\n\nReplacement.\n\nMore.", "utf8");
+    await waitForComment(session.sessionId, pageKey, comment.id);
+    await api("/api/respond", {
+      method: "POST",
+      body: JSON.stringify({
+        target: file,
+        items: [{ id: comment.id, status: "applied", note: "replaced it" }],
+      }),
+    });
+
+    const state = await sessionState(session.sessionId);
+    expect({
+      comment: state.pages[pageKey].comments.find((item: any) => item.id === comment.id),
+      userTurn: state.turns.at(-2).items[0],
+      agentTurn: state.turns.at(-1).items[0],
+    }).toMatchObject({
+      comment: { startLine: 3, endLine: 3, orphaned: true },
+      userTurn: { startLine: 3, endLine: 3, orphaned: true },
+      agentTurn: { startLine: 3, endLine: 3, orphaned: true },
+    });
   });
 });
