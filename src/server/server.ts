@@ -49,8 +49,7 @@ export class ReviewServer {
       const key = targetKey(file);
       const page = this.store.pages.get(key);
       if (page) {
-        page.content = content;
-        page.hash = hash;
+        this.store.reloadPage(page, content, hash);
         this.emitSessionEvent(key, "reload", { key, file });
       }
 
@@ -220,6 +219,7 @@ export class ReviewServer {
           side: c.side,
           quote: c.quote,
           feedback: c.feedback,
+          orphaned: c.orphaned,
         });
       }
       for (const e of page.edits) {
@@ -235,6 +235,7 @@ export class ReviewServer {
           side: e.side,
           originalText: e.originalText,
           suggestedText: e.suggestedText,
+          orphaned: e.orphaned,
         });
       }
     }
@@ -872,6 +873,7 @@ export class ReviewServer {
               startLine: item.startLine,
               endLine: item.endLine,
               feedback: entry.note,
+              orphaned: item.orphaned,
             });
             this.emitSessionEvent(page.key, "refresh", { page });
           }

@@ -18,6 +18,56 @@ export type { ResolvedDiff, DiffSource } from "../cli/git";
 
 const MARKDOWN_EXT = new Set([".md", ".markdown"]);
 
+type LineAnchor = {
+  startLine?: number;
+  endLine?: number;
+  orphaned?: boolean;
+};
+
+function anchorRanges(content: string, quote: string) {
+  const ranges: Array<{ startLine: number; endLine: number }> = [];
+  const lineSpan = quote.split("\n").length - 1;
+  let line = 1;
+  let scanned = 0;
+  let from = 0;
+  let index = content.indexOf(quote, from);
+  while (index !== -1) {
+    while (scanned < index) {
+      if (content.charCodeAt(scanned) === 10) line++;
+      scanned++;
+    }
+    const range = { startLine: line, endLine: line + lineSpan };
+    const previous = ranges.at(-1);
+    if (!previous || previous.startLine !== range.startLine || previous.endLine !== range.endLine) {
+      ranges.push(range);
+    }
+    from = index + Math.max(quote.length, 1);
+    index = content.indexOf(quote, from);
+  }
+  return ranges;
+}
+
+function reanchor(item: LineAnchor, quote: string | undefined, content: string) {
+  if (item.startLine === undefined) return;
+  if (!quote) {
+    item.orphaned = true;
+    return;
+  }
+
+  const ranges = anchorRanges(content, quote);
+  const current = ranges.find(
+    (range) =>
+      range.startLine === item.startLine &&
+      (item.endLine === undefined || range.endLine === item.endLine)
+  );
+  const match = current ?? (ranges.length === 1 ? ranges[0] : undefined);
+  item.orphaned = !match;
+  if (match) {
+    item.startLine = match.startLine;
+    item.endLine = match.endLine;
+  }
+}
+
 export function kindForFile(filePath: string): PageKind {
   return MARKDOWN_EXT.has(path.extname(filePath).toLowerCase()) ? "markdown" : "file";
 }
@@ -78,8 +128,7 @@ export class Store {
 
     const existing = this.pages.get(key);
     if (existing) {
-      existing.content = content;
-      existing.hash = this.hash(content);
+      this.reloadPage(existing, content);
       return existing;
     }
 
@@ -96,6 +145,34 @@ export class Store {
     this.pages.set(key, page);
     this.saveToDisk();
     return page;
+  }
+
+  public reloadPage(page: PageData, content: string, hash = this.hash(content)) {
+    page.content = content;
+    page.hash = hash;
+    for (const comment of page.comments) reanchor(comment, comment.quote, content);
+    for (const edit of page.edits) reanchor(edit, edit.originalText, content);
+    this.syncTurnAnchors(page);
+    this.saveToDisk();
+  }
+
+  private syncTurnAnchors(page: PageData) {
+    const anchors = new Map(
+      [...page.comments, ...page.edits].map((item) => [item.id, item] as const)
+    );
+    for (const session of this.sessions.values()) {
+      if (!session.pageKeys.has(page.key)) continue;
+      for (const turn of session.turns) {
+        for (const item of turn.items) {
+          if (item.pageKey !== page.key) continue;
+          const anchor = anchors.get(item.id);
+          if (!anchor) continue;
+          item.startLine = anchor.startLine;
+          item.endLine = anchor.endLine;
+          item.orphaned = anchor.orphaned;
+        }
+      }
+    }
   }
 
   public createDiffSession(resolved: ResolvedDiff): SessionInfo {
@@ -382,6 +459,12 @@ export class Store {
             turns: session.turns || [],
           });
         }
+      }
+      for (const page of this.pages.values()) {
+        if (page.kind === "diff") continue;
+        for (const comment of page.comments) reanchor(comment, comment.quote, page.content);
+        for (const edit of page.edits) reanchor(edit, edit.originalText, page.content);
+        this.syncTurnAnchors(page);
       }
       if (data.batches) {
         for (const [k, b] of Object.entries(data.batches)) {

@@ -57,6 +57,7 @@ function pendingItems(pages: Record<string, PageMeta>): FeedbackTurnItem[] {
         side: c.side,
         quote: c.quote,
         feedback: c.feedback,
+        orphaned: c.orphaned,
       });
     }
     for (const e of page.edits) {
@@ -72,6 +73,7 @@ function pendingItems(pages: Record<string, PageMeta>): FeedbackTurnItem[] {
         side: e.side,
         originalText: e.originalText,
         suggestedText: e.suggestedText,
+        orphaned: e.orphaned,
       });
     }
   }
@@ -79,6 +81,7 @@ function pendingItems(pages: Record<string, PageMeta>): FeedbackTurnItem[] {
 }
 
 function locationLabel(item: FeedbackTurnItem): string {
+  if (item.orphaned) return "Unplaced";
   if (item.kind === "edit") return `L${item.startLine}-${item.endLine}`;
   if (!item.startLine) return "General";
   const side = item.side === "old" ? "old " : item.side === "new" ? "new " : "";
@@ -183,7 +186,11 @@ export function FeedbackChat({
                           <ItemBubble
                             key={`${turn.id}-${i}`}
                             item={item}
-                            onJump={() => onJump(item.pageKey, item.startLine, item.side, item.id)}
+                            onJump={
+                              item.orphaned
+                                ? undefined
+                                : () => onJump(item.pageKey, item.startLine, item.side, item.id)
+                            }
                           />
                         ))}
                         {turn.note && (
@@ -238,7 +245,11 @@ export function FeedbackChat({
                           <ItemBubble
                             key={item.id}
                             item={item}
-                            onJump={() => onJump(item.pageKey, item.startLine, item.side, item.id)}
+                            onJump={
+                              item.orphaned
+                                ? undefined
+                                : () => onJump(item.pageKey, item.startLine, item.side, item.id)
+                            }
                             onDelete={() => handleDelete(item)}
                           />
                         ))}
@@ -319,7 +330,7 @@ function ItemBubble({
   onDelete,
 }: {
   item: FeedbackTurnItem;
-  onJump: () => void;
+  onJump?: () => void;
   onDelete?: () => void;
 }) {
   return (
@@ -342,11 +353,15 @@ function ItemBubble({
           item.status ? (STATUS_EDGE[item.status] ?? "") : ""
         }`}
         render={
-          <button
-            type="button"
-            onClick={onJump}
-            aria-label={`Show ${item.file || item.filename} ${locationLabel(item)}`}
-          />
+          onJump ? (
+            <button
+              type="button"
+              onClick={onJump}
+              aria-label={`Show ${item.file || item.filename} ${locationLabel(item)}`}
+            />
+          ) : (
+            <div />
+          )
         }
       >
         <div className="text-muted-foreground flex min-w-0 items-center gap-1.5 pe-6 text-xs font-medium">
@@ -356,7 +371,9 @@ function ItemBubble({
             <MessageSquare className="size-3 shrink-0" />
           )}
           <span className="truncate">{item.file || item.filename}</span>
-          <span className="shrink-0 opacity-70">{locationLabel(item)}</span>
+          <span className={`shrink-0 ${item.orphaned ? "text-amber-600" : "opacity-70"}`}>
+            {locationLabel(item)}
+          </span>
           {item.status && item.status !== "open" && <StatusChip status={item.status} />}
         </div>
 

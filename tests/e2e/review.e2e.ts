@@ -141,7 +141,49 @@ test.describe("diagram lightbox", () => {
   });
 });
 
+test.describe("markdown rendering", () => {
+  test("details sections expand from their summary", async ({ page, request }) => {
+    const session = await openSession(
+      request,
+      `# Review fixture\n\n<details>\n<summary>More context</summary>\n\nHidden **Markdown**.\n</details>`
+    );
+    await openReview(page, session);
+
+    const details = doc(page).locator("details");
+    await expect(details).toHaveCount(1);
+    await expect(details.getByText("Hidden Markdown.")).toBeHidden();
+
+    await details.getByText("More context").click();
+
+    await expect(details.getByText("Hidden Markdown.")).toBeVisible();
+    await expect(details.locator("strong")).toHaveText("Markdown");
+  });
+});
+
 test.describe("agent replies", () => {
+  test("a paragraph annotation sits beside its paragraph", async ({ page, request }) => {
+    const session = await openSession(request);
+    await addComment(request, session, { startLine: 3, feedback: "tighten this" });
+    await openReview(page, session);
+
+    const row = doc(page).locator(".annotated-aside:has(.annotation-thread)");
+    await expect(row).toHaveCSS("display", "grid");
+    const paragraph = await row.locator(":scope > p").boundingBox();
+    const annotation = await row.locator("[data-annot-id]").boundingBox();
+
+    expect(annotation!.x).toBeGreaterThan(paragraph!.x + paragraph!.width);
+  });
+
+  test("double-clicking an unsent annotation opens its editor", async ({ page, request }) => {
+    const session = await openSession(request);
+    await addComment(request, session, { startLine: 3, feedback: "tighten this" });
+    await openReview(page, session);
+
+    await doc(page).getByText("tighten this", { exact: true }).dblclick();
+
+    await expect(doc(page).locator("textarea")).toHaveValue("tighten this");
+  });
+
   test("a verdict lands on the annotation and in the transcript", async ({ page, request }) => {
     const session = await openSession(request);
     const id = await addComment(request, session, { startLine: 3, feedback: "tighten this" });

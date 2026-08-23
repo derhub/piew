@@ -392,8 +392,12 @@ function ReviewSessionComponent() {
     const page = session?.pages[activeKey];
     if (!page) return [] as Array<{ id: string; line?: number; side?: "old" | "new" }>;
     return [
-      ...page.comments.map((c) => ({ id: c.id, line: c.startLine, side: c.side })),
-      ...page.edits.map((e) => ({ id: e.id, line: e.startLine, side: e.side })),
+      ...page.comments
+        .filter((c) => !c.orphaned)
+        .map((c) => ({ id: c.id, line: c.startLine, side: c.side })),
+      ...page.edits
+        .filter((e) => !e.orphaned)
+        .map((e) => ({ id: e.id, line: e.startLine, side: e.side })),
     ].sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
   }, [session, activeKey]);
 
@@ -429,7 +433,7 @@ function ReviewSessionComponent() {
     for (const key of session?.pageKeys ?? []) {
       const page = session?.pages[key];
       const item = [...(page?.comments ?? []), ...(page?.edits ?? [])].find(
-        (entry) => entry.status === "question"
+        (entry) => entry.status === "question" && !entry.orphaned
       );
       if (item) return { key, line: item.startLine, id: item.id };
     }

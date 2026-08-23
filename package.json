@@ -76,6 +76,7 @@
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.12.3",
     "rehype-katex": "^7.0.1",
+    "rehype-raw": "^7.0.0",
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
     "remark-github-blockquote-alert": "^2.1.0",

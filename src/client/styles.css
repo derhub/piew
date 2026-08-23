@@ -220,6 +220,20 @@
   }
 }
 
+@media (min-width: 48rem) {
+  .typeset-docs > [data-annot].annotated-aside:has(> .annotation-thread) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(10rem, 0.75fr);
+    align-items: start;
+    gap: 0.75rem;
+    max-width: none;
+  }
+
+  .typeset-docs > [data-annot].annotated-aside > .annotation-thread {
+    margin-top: 0;
+  }
+}
+
 /* Only the innermost hovered block reveals its gutter. `:hover` also matches every
    ancestor block, so a descendant selector lit up every gutter inside the outer list. */
 [data-annot]:hover:not(:has([data-annot]:hover)) > .not-typeset > .annot-gutter,

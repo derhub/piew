@@ -37,6 +37,7 @@ export interface ReviewComment {
   /** What the agent did with it. Only a question is still answerable. */
   status?: ItemStatus;
   replies?: Reply[];
+  orphaned?: boolean;
 }
 
 export interface ReviewEdit {
@@ -51,6 +52,7 @@ export interface ReviewEdit {
   sent?: boolean;
   status?: ItemStatus;
   replies?: Reply[];
+  orphaned?: boolean;
 }
 
 export interface PageData {
@@ -105,6 +107,7 @@ export interface FeedbackTurnItem {
   feedback?: string;
   originalText?: string;
   suggestedText?: string;
+  orphaned?: boolean;
 }
 
 /** One press of Send, kept for the browser transcript. Dies with the session. */
