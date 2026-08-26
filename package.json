@@ -36,6 +36,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "perf": "bun scripts/perf.ts",
     "test": "bun test tests/unit tests/integration",
     "test:e2e": "playwright test",
     "lint": "oxlint",
