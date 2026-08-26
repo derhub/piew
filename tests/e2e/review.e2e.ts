@@ -300,7 +300,7 @@ test.describe("landing page", () => {
 
     await page.goto("/");
     await page
-      .getByRole("link", { name: /fixture\.md/ })
+      .getByRole("link", { name: /Review Map/ })
       .first()
       .click();
 

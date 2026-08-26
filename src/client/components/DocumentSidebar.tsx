@@ -1,40 +1,21 @@
 import React from "react";
 import { Search, X } from "lucide-react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { themeToTreeStyles, type GitStatusEntry } from "@pierre/trees";
+import {
+  preparePresortedFileTreeInput,
+  themeToTreeStyles,
+  type GitStatusEntry,
+} from "@pierre/trees";
 import { resolveTheme } from "@pierre/diffs";
 import { Button } from "~/components/ui/button";
 import { useCodeTheme } from "~/hooks/use-code-theme";
-import type { PageMeta } from "~/lib/types";
+import type { PageMeta, ReviewMap } from "~/lib/types";
 
 interface DocumentSidebarProps {
   pages: Record<string, PageMeta>;
-  pageKeys: string[];
-  activeKey: string;
-  onSelectPage: (key: string) => void;
-  title?: string;
-}
-
-// The tree is keyed by path, the session by page key. A diff page's filename is
-// already repo-relative; a document's is an absolute host path, which would
-// otherwise render as a chain of directories nobody is reviewing.
-function treePath(page: PageMeta): string {
-  return page.kind === "diff" ? page.filename : page.file.replace(/^\//, "");
-}
-
-/** Trims the directories every path shares, so a lone doc is one row again. */
-function stripCommonPrefix(paths: string[]): string[] {
-  if (paths.length === 0) return paths;
-  const split = paths.map((p) => p.split("/"));
-  const first = split[0];
-  let shared = 0;
-  while (
-    shared < first.length - 1 &&
-    split.every((s) => s.length > shared + 1 && s[shared] === first[shared])
-  ) {
-    shared++;
-  }
-  return split.map((s) => s.slice(shared).join("/"));
+  reviewMap: ReviewMap;
+  activePageId: string;
+  onSelectPage: (pageId: string) => void;
 }
 
 const GIT_STATUS: Record<string, GitStatusEntry["status"]> = {
@@ -44,48 +25,68 @@ const GIT_STATUS: Record<string, GitStatusEntry["status"]> = {
   renamed: "renamed",
 };
 
+function directoryPaths(paths: string[]): string[] {
+  const directories = new Set<string>();
+  for (const treePath of paths) {
+    const segments = treePath.split("/");
+    for (let depth = 1; depth < segments.length; depth++) {
+      directories.add(`${segments.slice(0, depth).join("/")}/`);
+    }
+  }
+  return [...directories];
+}
+
 export function DocumentSidebar({
   pages,
-  pageKeys,
-  activeKey,
+  reviewMap,
+  activePageId,
   onSelectPage,
-  title = "Explorer",
 }: DocumentSidebarProps) {
-  const ordered = React.useMemo(
-    () => pageKeys.map((key) => pages[key]).filter((p): p is PageMeta => !!p),
-    [pageKeys, pages]
-  );
-
-  const paths = React.useMemo(() => stripCommonPrefix(ordered.map(treePath)), [ordered]);
+  const items = reviewMap.items;
+  const pathsKey = items.map((item) => item.path).join("\n");
+  const paths = React.useMemo(() => (pathsKey ? pathsKey.split("\n") : []), [pathsKey]);
+  const preparedInput = React.useMemo(() => preparePresortedFileTreeInput(paths), [paths]);
 
   const keyByPath = React.useMemo(() => {
     const map = new Map<string, string>();
-    ordered.forEach((page, i) => map.set(paths[i], page.key));
+    items.forEach((item) => map.set(item.path, item.pageId));
     return map;
-  }, [ordered, paths]);
+  }, [items]);
 
   const pathByKey = React.useMemo(() => {
     const map = new Map<string, string>();
-    ordered.forEach((page, i) => map.set(page.key, paths[i]));
+    items.forEach((item) => map.set(item.pageId, item.path));
     return map;
-  }, [ordered, paths]);
+  }, [items]);
 
   const countByPath = React.useMemo(() => {
     const map = new Map<string, number>();
-    ordered.forEach((page, i) => map.set(paths[i], page.comments.length + page.edits.length));
+    items.forEach((item) => {
+      const page = pages[item.pageId];
+      map.set(item.path, page ? page.comments.length + page.edits.length : 0);
+    });
     return map;
-  }, [ordered, paths]);
+  }, [items, pages]);
+  const annotationCountsKey = JSON.stringify([...countByPath]);
 
   const gitStatus = React.useMemo<GitStatusEntry[]>(
     () =>
-      ordered
-        .map((p, i) => ({ page: p, path: paths[i] }))
+      items
+        .map((item) => ({ page: pages[item.pageId], path: item.path }))
+        .filter(({ page }): page is PageMeta & { status?: PageMeta["status"] } => !!page)
         .filter(({ page }) => page.kind === "diff" && page.status && GIT_STATUS[page.status])
         .map(({ page, path }) => ({ path, status: GIT_STATUS[page.status!] })),
-    [ordered, paths]
+    [items, pages]
   );
 
-  const activePath = pathByKey.get(activeKey);
+  const activePath = pathByKey.get(activePageId);
+  const [initialExpandedPaths] = React.useState(() => {
+    const expanded = new Set(paths.map((treePath) => `${treePath.split("/")[0]}/`));
+    if (activePath) {
+      for (const directory of directoryPaths([activePath])) expanded.add(directory);
+    }
+    return [...expanded];
+  });
 
   // The model reads these through refs on every render pass, so the callbacks
   // must see current props rather than the ones captured at mount.
@@ -97,10 +98,12 @@ export function DocumentSidebar({
   keyRef.current = keyByPath;
 
   const { model } = useFileTree({
-    paths,
+    preparedInput,
     gitStatus,
     density: "compact",
-    initialExpansion: "open",
+    flattenEmptyDirectories: false,
+    initialExpansion: "closed",
+    initialExpandedPaths,
     search: true,
     initialSelectedPaths: activePath ? [activePath] : [],
     onSelectionChange: (selected) => {
@@ -115,10 +118,18 @@ export function DocumentSidebar({
   });
 
   // The model is created once; every later change is a method call on it.
-  const pathsKey = paths.join("\n");
+  const mounted = React.useRef(false);
   React.useEffect(() => {
-    model.resetPaths(paths);
-  }, [model, pathsKey]);
+    if (!mounted.current) {
+      mounted.current = true;
+      for (const treePath of initialExpandedPaths) model.getItem(treePath)?.expand();
+      return;
+    }
+    const expanded = directoryPaths(paths).filter(
+      (treePath) => model.getItem(treePath)?.isExpanded() ?? false
+    );
+    model.resetPaths({ preparedInput, initialExpandedPaths: expanded });
+  }, [model, pathsKey, preparedInput, paths, annotationCountsKey, initialExpandedPaths]);
 
   React.useEffect(() => {
     model.setGitStatus(gitStatus);
@@ -166,9 +177,14 @@ export function DocumentSidebar({
     <div className="bg-sidebar text-sidebar-foreground flex h-full min-h-0 flex-col border-r">
       <div className="flex h-9 shrink-0 items-center gap-1 border-b pr-1 pl-3">
         <span className="text-muted-foreground flex-1 truncate text-[11px] font-medium tracking-wider uppercase">
-          {title}
+          {reviewMap.title}
         </span>
-        <span className="text-muted-foreground text-[11px] tabular-nums">{ordered.length}</span>
+        <span
+          className="text-muted-foreground text-[11px] tabular-nums"
+          aria-label={`${items.length} documents`}
+        >
+          {items.length}
+        </span>
         <Button
           variant="ghost"
           size="icon-xs"

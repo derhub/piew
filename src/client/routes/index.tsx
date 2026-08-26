@@ -12,6 +12,7 @@ export const Route = createRoute({
 
 interface SessionRow {
   id: string;
+  title: string;
   kind: "markdown" | "diff" | "file";
   files: string[];
   lastSeen: number;
@@ -23,18 +24,7 @@ function IndexComponent() {
   React.useEffect(() => {
     fetch("/api/sessions")
       .then((r) => r.json())
-      // Reopening the same files starts a new session; only the newest is worth a row.
-      .then((body) => {
-        const seen = new Set<string>();
-        setSessions(
-          (body.sessions ?? []).filter((session: SessionRow) => {
-            const key = session.files.join("|");
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-          })
-        );
-      })
+      .then((body) => setSessions(body.sessions ?? []))
       .catch(() => setSessions([]));
   }, []);
 
@@ -80,7 +70,7 @@ function IndexComponent() {
                   ) : (
                     <FileText className="size-3.5 shrink-0" />
                   )}
-                  <span className="min-w-0 flex-1 truncate">{session.files.join(", ")}</span>
+                  <span className="min-w-0 flex-1 truncate">{session.title}</span>
                   <span className="text-muted-foreground shrink-0 text-xs">
                     {session.files.length} file{session.files.length === 1 ? "" : "s"}
                   </span>

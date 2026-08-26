@@ -33,27 +33,28 @@ describe("Respond round trip", () => {
       body: JSON.stringify({ files: [file] }),
     }).then((r) => r.json());
 
-    const page = await api(`/api/page/${session.pageKeys[0]}/comment`, {
+    const pageId = session.reviewMap.items[0].pageId;
+    const page = await api(`/api/session/${session.sessionId}/page/${pageId}/comment`, {
       method: "POST",
       body: JSON.stringify({ startLine: 3, feedback }),
     }).then((r) => r.json());
 
-    await api("/api/send", {
+    await api(`/api/session/${session.sessionId}/send`, {
       method: "POST",
-      body: JSON.stringify({ sessionId: session.sessionId }),
+      body: JSON.stringify({}),
     });
 
     const comment = page.page.comments.at(-1);
-    return { session, commentId: comment.id as string };
+    return { session, pageId, commentId: comment.id as string };
   }
 
   const sessionState = (id: string) => api(`/api/session/${id}`).then((r) => r.json());
 
-  async function waitForComment(sessionId: string, pageKey: string, commentId: string) {
+  async function waitForComment(sessionId: string, pageId: string, commentId: string) {
     const deadline = Date.now() + 2_000;
     while (Date.now() < deadline) {
       const state = await sessionState(sessionId);
-      const comment = state.pages[pageKey].comments.find((item: any) => item.id === commentId);
+      const comment = state.pages[pageId].comments.find((item: any) => item.id === commentId);
       if (comment?.startLine === 5 || comment?.orphaned) return comment;
       await Bun.sleep(25);
     }
@@ -63,10 +64,9 @@ describe("Respond round trip", () => {
   it("records the agent's verdict on a delivered comment", async () => {
     const { session, commentId } = await deliveredComment("tighten this");
 
-    const result = await api("/api/respond", {
+    const result = await api(`/api/session/${session.sessionId}/respond`, {
       method: "POST",
       body: JSON.stringify({
-        target: file,
         note: "applied both",
         items: [{ id: commentId, status: "applied", note: "rewrote the opening" }],
       }),
@@ -75,7 +75,9 @@ describe("Respond round trip", () => {
     expect(result.unknown).toEqual([]);
 
     const state = await sessionState(session.sessionId);
-    const comment = state.pages[session.pageKeys[0]].comments.find((c: any) => c.id === commentId);
+    const comment = state.pages[session.reviewMap.items[0].pageId].comments.find(
+      (c: any) => c.id === commentId
+    );
     expect(comment.status).toBe("applied");
     expect(comment.replies[0]).toMatchObject({ from: "agent", text: "rewrote the opening" });
   });
@@ -83,10 +85,9 @@ describe("Respond round trip", () => {
   it("reports an id it was never sent and writes nothing for it", async () => {
     const { session } = await deliveredComment("second pass");
 
-    const result = await api("/api/respond", {
+    const result = await api(`/api/session/${session.sessionId}/respond`, {
       method: "POST",
       body: JSON.stringify({
-        target: file,
         items: [{ id: "c_notreal", status: "applied" }],
       }),
     }).then((r) => r.json());
@@ -101,12 +102,11 @@ describe("Respond round trip", () => {
   });
 
   it("refuses a status it does not recognise", async () => {
-    const { commentId } = await deliveredComment("third pass");
+    const { session, commentId } = await deliveredComment("third pass");
 
-    const result = await api("/api/respond", {
+    const result = await api(`/api/session/${session.sessionId}/respond`, {
       method: "POST",
       body: JSON.stringify({
-        target: file,
         items: [{ id: commentId, status: "done" }],
       }),
     }).then((r) => r.json());
@@ -117,10 +117,9 @@ describe("Respond round trip", () => {
   it("appends the agent turn to the transcript the browser reads", async () => {
     const { session, commentId } = await deliveredComment("fourth pass");
 
-    await api("/api/respond", {
+    await api(`/api/session/${session.sessionId}/respond`, {
       method: "POST",
       body: JSON.stringify({
-        target: file,
         note: "one open question",
         items: [{ id: commentId, status: "question", note: "which heading do you mean?" }],
       }),
@@ -139,29 +138,29 @@ describe("Respond round trip", () => {
       method: "POST",
       body: JSON.stringify({ files: [file] }),
     }).then((r) => r.json());
-    const pageKey = session.pageKeys[0];
-    const { comment } = await api(`/api/page/${pageKey}/comment`, {
+    const pageId = session.activePageId;
+    const page = await api(`/api/session/${session.sessionId}/page/${pageId}/comment`, {
       method: "POST",
       body: JSON.stringify({ startLine: 3, endLine: 3, quote: "Content.", feedback: "move me" }),
     }).then((r) => r.json());
-    await api("/api/send", {
+    const comment = page.page.comments.at(-1);
+    await api(`/api/session/${session.sessionId}/send`, {
       method: "POST",
-      body: JSON.stringify({ sessionId: session.sessionId }),
+      body: JSON.stringify({}),
     });
 
     fs.writeFileSync(file, "# Doc\n\nNew line.\n\nContent.\n\nMore.", "utf8");
-    await waitForComment(session.sessionId, pageKey, comment.id);
-    await api("/api/respond", {
+    await waitForComment(session.sessionId, pageId, comment.id);
+    await api(`/api/session/${session.sessionId}/respond`, {
       method: "POST",
       body: JSON.stringify({
-        target: file,
         items: [{ id: comment.id, status: "applied", note: "moved it" }],
       }),
     });
 
     const state = await sessionState(session.sessionId);
     expect({
-      comment: state.pages[pageKey].comments.find((item: any) => item.id === comment.id),
+      comment: state.pages[pageId].comments.find((item: any) => item.id === comment.id),
       userTurn: state.turns.at(-2).items[0],
       agentTurn: state.turns.at(-1).items[0],
     }).toMatchObject({
@@ -177,29 +176,29 @@ describe("Respond round trip", () => {
       method: "POST",
       body: JSON.stringify({ files: [file] }),
     }).then((r) => r.json());
-    const pageKey = session.pageKeys[0];
-    const { comment } = await api(`/api/page/${pageKey}/comment`, {
+    const pageId = session.activePageId;
+    const page = await api(`/api/session/${session.sessionId}/page/${pageId}/comment`, {
       method: "POST",
       body: JSON.stringify({ startLine: 3, endLine: 3, quote: "Content.", feedback: "keep me" }),
     }).then((r) => r.json());
-    await api("/api/send", {
+    const comment = page.page.comments.at(-1);
+    await api(`/api/session/${session.sessionId}/send`, {
       method: "POST",
-      body: JSON.stringify({ sessionId: session.sessionId }),
+      body: JSON.stringify({}),
     });
 
     fs.writeFileSync(file, "# Doc\n\nReplacement.\n\nMore.", "utf8");
-    await waitForComment(session.sessionId, pageKey, comment.id);
-    await api("/api/respond", {
+    await waitForComment(session.sessionId, pageId, comment.id);
+    await api(`/api/session/${session.sessionId}/respond`, {
       method: "POST",
       body: JSON.stringify({
-        target: file,
         items: [{ id: comment.id, status: "applied", note: "replaced it" }],
       }),
     });
 
     const state = await sessionState(session.sessionId);
     expect({
-      comment: state.pages[pageKey].comments.find((item: any) => item.id === comment.id),
+      comment: state.pages[pageId].comments.find((item: any) => item.id === comment.id),
       userTurn: state.turns.at(-2).items[0],
       agentTurn: state.turns.at(-1).items[0],
     }).toMatchObject({

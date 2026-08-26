@@ -1,22 +1,25 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { gitTarget, stateDataPath, targetKey } from "../cli/paths";
+import { ensureStateDir, stateDataPath } from "../cli/paths";
 import type { ResolvedDiff } from "../cli/git";
 import type {
-  FeedbackTurn,
   ItemStatus,
   PageData,
   PageKind,
+  ReplaceReviewMapRequest,
   ReviewBatch,
   ReviewComment,
   ReviewEdit,
+  ReviewMap,
+  ReviewSession,
   SessionInfo,
 } from "../lib/types";
 
 export type { ResolvedDiff, DiffSource } from "../cli/git";
 
 const MARKDOWN_EXT = new Set([".md", ".markdown"]);
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 type LineAnchor = {
   startLine?: number;
@@ -72,43 +75,83 @@ export function kindForFile(filePath: string): PageKind {
   return MARKDOWN_EXT.has(path.extname(filePath).toLowerCase()) ? "markdown" : "file";
 }
 
-export interface StoredState {
-  pages: Record<string, { file: string; comments: ReviewComment[]; edits: ReviewEdit[] }>;
-  /** Diff pages carry their own bytes: the working tree has already moved on. */
-  diffPages: Record<
-    string,
-    Omit<PageData, "key" | "content"> & { comments: ReviewComment[]; edits: ReviewEdit[] }
-  >;
-  sessions: Record<
-    string,
-    {
-      entryKey: string;
-      activeKey: string;
-      pageKeys: string[];
-      lastSeen: number;
-      turns: FeedbackTurn[];
-    }
-  >;
-  batches: Record<string, { batch: ReviewBatch; delivered: boolean }>;
+export class ReviewMapError extends Error {
+  constructor(
+    message: string,
+    public status: 400 | 404 | 409 = 400
+  ) {
+    super(message);
+  }
 }
 
-/** A session older than this is a browser tab nobody came back to. */
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export function normalizeReviewMapRequest(input: unknown): ReplaceReviewMapRequest {
+  if (!input || typeof input !== "object") throw new ReviewMapError("Invalid Review Map");
+  const value = input as Partial<ReplaceReviewMapRequest>;
+  if (typeof value.title !== "string" || !value.title.trim()) {
+    throw new ReviewMapError("Review Map title is required");
+  }
+  if (!Array.isArray(value.items) || value.items.length === 0) {
+    throw new ReviewMapError("Review Map items are required");
+  }
+
+  const paths = new Set<string>();
+  const pageIds = new Set<string>();
+  const items = value.items.map((item) => {
+    if (!item || typeof item !== "object" || typeof item.path !== "string") {
+      throw new ReviewMapError("Invalid Review Map item");
+    }
+    const segments = item.path.split("/");
+    if (
+      item.path.startsWith("/") ||
+      item.path.includes("\\") ||
+      [...item.path].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      }) ||
+      segments.length > 5 ||
+      segments.some((segment) => !segment.trim() || segment === "." || segment === "..")
+    ) {
+      throw new ReviewMapError(`Invalid Review Map path: ${item.path}`);
+    }
+    if (paths.has(item.path)) {
+      throw new ReviewMapError(`Duplicate Review Map path: ${item.path}`, 409);
+    }
+    paths.add(item.path);
+
+    const source = item.source;
+    if (!source || typeof source !== "object") throw new ReviewMapError("Invalid page source");
+    if (source.kind === "page") {
+      if (typeof source.pageId !== "string" || !source.pageId) {
+        throw new ReviewMapError("Invalid page source");
+      }
+      if (pageIds.has(source.pageId)) {
+        throw new ReviewMapError(`Duplicate Review Map page: ${source.pageId}`, 409);
+      }
+      pageIds.add(source.pageId);
+      return { path: item.path, source: { kind: "page" as const, pageId: source.pageId } };
+    }
+    if (source.kind === "file" && typeof source.file === "string" && source.file) {
+      return {
+        path: item.path,
+        source: { kind: "file" as const, file: path.resolve(source.file) },
+      };
+    }
+    throw new ReviewMapError("Invalid page source");
+  });
+
+  return { title: value.title.trim(), items };
+}
+
+interface StoredState {
+  sessions: Record<string, ReviewSession>;
+}
+
+function isTerminal(item: ReviewComment | ReviewEdit): boolean {
+  return item.status === "applied" || item.status === "skipped";
+}
 
 export class Store {
-  public pages = new Map<string, PageData>();
-  public sessions = new Map<
-    string,
-    {
-      id: string;
-      entryKey: string;
-      activeKey: string;
-      pageKeys: Set<string>;
-      lastSeen: number;
-      turns: FeedbackTurn[];
-    }
-  >();
-  public batches = new Map<string, { batch: ReviewBatch; delivered: boolean }>();
+  public sessions = new Map<string, ReviewSession>();
 
   constructor() {
     this.loadFromDisk();
@@ -118,33 +161,72 @@ export class Store {
     return crypto.createHash("sha1").update(content).digest("hex");
   }
 
-  public openPage(filePath: string): PageData {
-    const absPath = path.resolve(filePath);
-    const key = targetKey(absPath);
-    let content = "";
-    if (fs.existsSync(absPath)) {
-      content = fs.readFileSync(absPath, "utf8");
-    }
+  private pageId(): string {
+    return `p_${crypto.randomBytes(6).toString("hex")}`;
+  }
 
-    const existing = this.pages.get(key);
-    if (existing) {
-      this.reloadPage(existing, content);
-      return existing;
-    }
+  private sessionId(): string {
+    return `s_${crypto.randomBytes(6).toString("hex")}`;
+  }
 
-    const page: PageData = {
-      key,
-      file: absPath,
-      filename: path.basename(absPath),
-      kind: kindForFile(absPath),
+  private filePage(filePath: string): PageData {
+    const file = path.resolve(filePath);
+    const content = fs.readFileSync(file, "utf8");
+    const id = this.pageId();
+    return {
+      id,
+      file,
+      filename: path.basename(file),
+      kind: kindForFile(file),
       content,
       comments: [],
       edits: [],
       hash: this.hash(content),
     };
-    this.pages.set(key, page);
+  }
+
+  private defaultMap(
+    title: string,
+    pages: PageData[],
+    makePath = (page: PageData) => `${path.basename(path.dirname(page.file))}/${page.filename}`
+  ): ReviewMap {
+    const used = new Set<string>();
+    const items = pages.map((page) => {
+      const base = makePath(page);
+      const segments = base.split("/");
+      const leaf = segments.pop()!;
+      let mapPath = base;
+      for (let suffix = 2; used.has(mapPath); suffix++) {
+        mapPath = [...segments, `${suffix}-${leaf}`].join("/");
+      }
+      used.add(mapPath);
+      return { pageId: page.id, path: mapPath };
+    });
+    return { title, items };
+  }
+
+  private sessionInfo(session: ReviewSession): SessionInfo {
+    return {
+      id: session.id,
+      activePageId: session.activePageId,
+      reviewMap: session.reviewMap,
+    };
+  }
+
+  public createSession(files: string[]): SessionInfo {
+    const pages = files.map((file) => this.filePage(file));
+    const id = this.sessionId();
+    const session: ReviewSession = {
+      id,
+      activePageId: pages[0]?.id ?? "",
+      reviewMap: this.defaultMap("Review Map", pages),
+      pages: Object.fromEntries(pages.map((page) => [page.id, page])),
+      lastSeen: Date.now(),
+      turns: [],
+    };
+    this.sessions.set(id, session);
     this.saveToDisk();
-    return page;
+    return this.sessionInfo(session);
   }
 
   public reloadPage(page: PageData, content: string, hash = this.hash(content)) {
@@ -161,10 +243,10 @@ export class Store {
       [...page.comments, ...page.edits].map((item) => [item.id, item] as const)
     );
     for (const session of this.sessions.values()) {
-      if (!session.pageKeys.has(page.key)) continue;
+      if (!session.pages[page.id]) continue;
       for (const turn of session.turns) {
         for (const item of turn.items) {
-          if (item.pageKey !== page.key) continue;
+          if (item.pageId !== page.id) continue;
           const anchor = anchors.get(item.id);
           if (!anchor) continue;
           item.startLine = anchor.startLine;
@@ -176,31 +258,14 @@ export class Store {
   }
 
   public createDiffSession(resolved: ResolvedDiff): SessionInfo {
-    const id = `s_${crypto.randomBytes(6).toString("hex")}`;
-    const entryKey = targetKey(gitTarget(resolved.repoRoot, resolved.range));
-    const pageKeys = new Set<string>();
-
-    for (const diff of resolved.files) {
+    const pages = resolved.files.map((diff) => {
       const shown = diff.newPath || diff.oldPath || "";
-      const abs = path.join(resolved.repoRoot, shown);
-      const key = targetKey(`${gitTarget(resolved.repoRoot, resolved.range)}#${shown}`);
-
-      // The key is a pure function of range and path so `piew poll` can rebuild
-      // it. Re-running the same range must therefore refresh a page in place,
-      // never replace it: a fresh object would drop comments a browser still shows.
-      const existing = this.pages.get(key);
-      if (existing) {
-        existing.diff = diff;
-        existing.stale = false;
-        pageKeys.add(key);
-        continue;
-      }
-
-      this.pages.set(key, {
-        key,
-        file: abs,
+      const id = this.pageId();
+      return {
+        id,
+        file: path.join(resolved.repoRoot, shown),
         filename: shown,
-        kind: "diff",
+        kind: "diff" as const,
         content: "",
         diff,
         repoRoot: resolved.repoRoot,
@@ -210,136 +275,155 @@ export class Store {
         comments: [],
         edits: [],
         hash: this.hash(`${resolved.range}#${shown}#${diff.status}`),
-      });
-      pageKeys.add(key);
-    }
-
-    this.sessions.set(id, {
+      } satisfies PageData;
+    });
+    const id = this.sessionId();
+    const session: ReviewSession = {
       id,
-      entryKey,
-      activeKey: [...pageKeys][0] || entryKey,
-      pageKeys,
+      activePageId: pages[0]?.id ?? "",
+      reviewMap: this.defaultMap(
+        `${path.basename(resolved.repoRoot)} ${resolved.range}`,
+        pages,
+        (page) =>
+          [path.basename(resolved.repoRoot), ...page.filename.split("/").slice(-4)].join("/")
+      ),
+      pages: Object.fromEntries(pages.map((page) => [page.id, page])),
       lastSeen: Date.now(),
       turns: [],
-    });
-
-    // The blobs are frozen with the page, so a restart restores the exact bytes
-    // that were reviewed rather than re-running the range against a moved tree.
-    this.saveToDisk();
-    return { id, entryKey, activeKey: [...pageKeys][0] || entryKey, pageKeys: [...pageKeys] };
-  }
-
-  public createSession(files: string[]): SessionInfo {
-    const id = `s_${crypto.randomBytes(6).toString("hex")}`;
-    const pageKeys = new Set<string>();
-
-    for (const f of files) {
-      const page = this.openPage(f);
-      pageKeys.add(page.key);
-    }
-
-    const firstKey = [...pageKeys][0] || "";
-    this.sessions.set(id, {
-      id,
-      entryKey: firstKey,
-      activeKey: firstKey,
-      pageKeys,
-      lastSeen: Date.now(),
-      turns: [],
-    });
-    this.saveToDisk();
-
-    return {
-      id,
-      entryKey: firstKey,
-      activeKey: firstKey,
-      pageKeys: [...pageKeys],
     };
+    this.sessions.set(id, session);
+    this.saveToDisk();
+    return this.sessionInfo(session);
   }
 
-  public addPageToSession(sessionId: string, filePath: string): PageData | null {
+  public getPage(sessionId: string, pageId: string): PageData | undefined {
+    return this.sessions.get(sessionId)?.pages[pageId];
+  }
+
+  public replaceReviewMap(sessionId: string, input: unknown): SessionInfo {
+    const request = normalizeReviewMapRequest(input);
     const session = this.sessions.get(sessionId);
-    if (!session) return null;
-    const page = this.openPage(filePath);
-    session.pageKeys.add(page.key);
-    session.activeKey = page.key;
-    return page;
+    if (!session) throw new ReviewMapError("Review session not found", 404);
+
+    const pages: Record<string, PageData> = {};
+    const items: ReviewMap["items"] = [];
+    for (const item of request.items) {
+      let page: PageData | undefined;
+      if (item.source.kind === "page") {
+        page = session.pages[item.source.pageId];
+        if (!page) throw new ReviewMapError(`Review page not found: ${item.source.pageId}`, 404);
+      } else {
+        const file = item.source.file;
+        if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+          throw new ReviewMapError(`File not found: ${file}`, 404);
+        }
+        page = [...Object.values(session.pages), ...Object.values(pages)].find(
+          (candidate) => candidate.file === file
+        );
+        page ??= this.filePage(file);
+      }
+      if (pages[page.id]) throw new ReviewMapError(`Duplicate Review Map page: ${page.id}`, 409);
+      pages[page.id] = page;
+      items.push({ pageId: page.id, path: item.path });
+    }
+
+    for (const [pageId, page] of Object.entries(session.pages)) {
+      if (pages[pageId]) continue;
+      if ([...page.comments, ...page.edits].some((item) => !isTerminal(item))) {
+        throw new ReviewMapError(`Page has unresolved annotations: ${page.filename}`, 409);
+      }
+    }
+
+    const nextSession: ReviewSession = {
+      ...session,
+      reviewMap: { title: request.title, items },
+      pages,
+      activePageId: pages[session.activePageId] ? session.activePageId : items[0].pageId,
+      lastSeen: Date.now(),
+    };
+    this.sessions.set(sessionId, nextSession);
+    try {
+      this.saveToDisk();
+    } catch (error) {
+      this.sessions.set(sessionId, session);
+      throw error;
+    }
+    return this.sessionInfo(nextSession);
   }
 
-  public addComment(key: string, comment: ReviewComment): PageData | null {
-    const page = this.pages.get(key);
+  public addComment(sessionId: string, pageId: string, comment: ReviewComment): PageData | null {
+    const page = this.getPage(sessionId, pageId);
     if (!page) return null;
     page.comments.push(comment);
     this.saveToDisk();
     return page;
   }
 
-  public updateComment(key: string, commentId: string, feedback: string): PageData | null {
-    const page = this.pages.get(key);
-    const comment = page?.comments.find((c) => c.id === commentId);
+  public updateComment(
+    sessionId: string,
+    pageId: string,
+    commentId: string,
+    feedback: string
+  ): PageData | null {
+    const page = this.getPage(sessionId, pageId);
+    const comment = page?.comments.find((candidate) => candidate.id === commentId);
     if (!page || !comment) return null;
     comment.feedback = feedback;
     this.saveToDisk();
     return page;
   }
 
-  public updateEdit(key: string, editId: string, suggestedText: string): PageData | null {
-    const page = this.pages.get(key);
-    const edit = page?.edits.find((e) => e.id === editId);
-    if (!page || !edit) return null;
-    edit.suggestedText = suggestedText;
-    this.saveToDisk();
-    return page;
-  }
-
-  public removeComment(key: string, commentId: string): PageData | null {
-    const page = this.pages.get(key);
+  public removeComment(sessionId: string, pageId: string, commentId: string): PageData | null {
+    const page = this.getPage(sessionId, pageId);
     if (!page) return null;
-    page.comments = page.comments.filter((c) => c.id !== commentId);
+    page.comments = page.comments.filter((comment) => comment.id !== commentId);
     this.saveToDisk();
     return page;
   }
 
-  public addEdit(key: string, edit: ReviewEdit): PageData | null {
-    const page = this.pages.get(key);
+  public addEdit(sessionId: string, pageId: string, edit: ReviewEdit): PageData | null {
+    const page = this.getPage(sessionId, pageId);
     if (!page) return null;
     page.edits.push(edit);
     this.saveToDisk();
     return page;
   }
 
-  public removeEdit(key: string, editId: string): PageData | null {
-    const page = this.pages.get(key);
-    if (!page) return null;
-    page.edits = page.edits.filter((e) => e.id !== editId);
+  public updateEdit(
+    sessionId: string,
+    pageId: string,
+    editId: string,
+    suggestedText: string
+  ): PageData | null {
+    const page = this.getPage(sessionId, pageId);
+    const edit = page?.edits.find((candidate) => candidate.id === editId);
+    if (!page || !edit) return null;
+    edit.suggestedText = suggestedText;
     this.saveToDisk();
     return page;
   }
 
-  /**
-   * The agent's verdict on one delivered annotation. An item it never received
-   * is refused: a status on unsent work would claim an exchange that never happened.
-   */
+  public removeEdit(sessionId: string, pageId: string, editId: string): PageData | null {
+    const page = this.getPage(sessionId, pageId);
+    if (!page) return null;
+    page.edits = page.edits.filter((edit) => edit.id !== editId);
+    this.saveToDisk();
+    return page;
+  }
+
   public setItemStatus(
-    entryKey: string,
+    sessionId: string,
     id: string,
     status: ItemStatus,
     note?: string
   ): { page: PageData; item: ReviewComment | ReviewEdit } | null {
-    // One target can be open in several browser sessions; the annotation lives on
-    // the page, so any session that shows it can be the one that found it.
-    const keys = new Set<string>([entryKey]);
-    for (const session of this.sessions.values()) {
-      if (session.entryKey === entryKey) for (const key of session.pageKeys) keys.add(key);
-    }
-
-    for (const key of keys) {
-      const page = this.pages.get(key);
-      if (!page) continue;
-
-      const item = page.comments.find((c) => c.id === id) ?? page.edits.find((e) => e.id === id);
-      if (!item || !item.sent) continue;
-
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    for (const page of Object.values(session.pages)) {
+      const item =
+        page.comments.find((comment) => comment.id === id) ??
+        page.edits.find((edit) => edit.id === id);
+      if (!item?.sent) continue;
       item.status = status;
       if (note?.trim()) {
         item.replies = [
@@ -353,126 +437,76 @@ export class Store {
     return null;
   }
 
-  public setBatch(entryKey: string, batch: ReviewBatch) {
-    this.batches.set(entryKey, { batch, delivered: false });
+  public setBatch(sessionId: string, batch: ReviewBatch): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.pendingBatch = { batch, delivered: false };
     this.saveToDisk();
   }
 
-  public getBatch(entryKey: string) {
-    return this.batches.get(entryKey);
+  public getBatch(sessionId: string) {
+    return this.sessions.get(sessionId)?.pendingBatch;
   }
 
-  public clearBatch(entryKey: string) {
-    this.batches.delete(entryKey);
+  public clearBatch(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    delete session.pendingBatch;
     this.saveToDisk();
   }
 
-  public clearSentFeedback(entryKey: string) {
-    const session = [...this.sessions.values()].find((s) => s.entryKey === entryKey);
-    const keysToClean = session ? session.pageKeys : new Set([entryKey]);
-    for (const key of keysToClean) {
-      const page = this.pages.get(key);
-      if (page) {
-        page.comments = [];
-        page.edits = [];
-      }
+  public clearSentFeedback(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    for (const page of Object.values(session.pages)) {
+      page.comments = [];
+      page.edits = [];
     }
     this.saveToDisk();
   }
 
-  /** Called by the server too: a turn is state the browser must get back after a restart. */
-  public saveToDisk() {
+  public saveToDisk(): void {
+    ensureStateDir();
+    const target = stateDataPath();
+    const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
-      const data: StoredState = {
-        pages: {},
-        diffPages: {},
-        sessions: {},
-        batches: {},
-      };
-      for (const [key, p] of this.pages.entries()) {
-        if (p.kind === "diff") {
-          const { key: _key, content: _content, ...rest } = p;
-          data.diffPages[key] = rest;
-          continue;
-        }
-        if (p.comments.length || p.edits.length) {
-          data.pages[key] = { file: p.file, comments: p.comments, edits: p.edits };
-        }
-      }
-      for (const [id, session] of this.sessions.entries()) {
-        data.sessions[id] = {
-          entryKey: session.entryKey,
-          activeKey: session.activeKey,
-          pageKeys: [...session.pageKeys],
-          lastSeen: session.lastSeen,
-          turns: session.turns,
-        };
-      }
-      for (const [k, b] of this.batches.entries()) {
-        data.batches[k] = b;
-      }
-      fs.writeFileSync(stateDataPath(), JSON.stringify(data, null, 2), "utf8");
-    } catch {
-      // Disk write error ignored
+      fs.writeFileSync(
+        temporary,
+        JSON.stringify(
+          { sessions: Object.fromEntries(this.sessions) } satisfies StoredState,
+          null,
+          2
+        ),
+        "utf8"
+      );
+      fs.renameSync(temporary, target);
+    } catch (error) {
+      fs.rmSync(temporary, { force: true });
+      throw error;
     }
   }
 
-  private loadFromDisk() {
+  private loadFromDisk(): void {
     try {
-      const raw = fs.readFileSync(stateDataPath(), "utf8");
-      const data: StoredState = JSON.parse(raw);
-      if (data.pages) {
-        for (const [key, p] of Object.entries(data.pages)) {
-          if (fs.existsSync(p.file)) {
-            const content = fs.readFileSync(p.file, "utf8");
-            this.pages.set(key, {
-              key,
-              file: p.file,
-              filename: path.basename(p.file),
-              kind: kindForFile(p.file),
-              content,
-              comments: p.comments || [],
-              edits: p.edits || [],
-              hash: this.hash(content),
-            });
+      const data = JSON.parse(fs.readFileSync(stateDataPath(), "utf8")) as StoredState;
+      const cutoff = Date.now() - SESSION_TTL_MS;
+      for (const session of Object.values(data.sessions ?? {})) {
+        if (session.lastSeen >= cutoff && session.reviewMap && session.pages) {
+          this.sessions.set(session.id, session);
+        }
+      }
+      for (const session of this.sessions.values()) {
+        for (const page of Object.values(session.pages)) {
+          if (page.kind === "diff") continue;
+          if (fs.existsSync(page.file)) {
+            page.content = fs.readFileSync(page.file, "utf8");
+            page.hash = this.hash(page.content);
           }
+          for (const comment of page.comments) reanchor(comment, comment.quote, page.content);
+          for (const edit of page.edits) reanchor(edit, edit.originalText, page.content);
+          this.syncTurnAnchors(page);
         }
       }
-      if (data.diffPages) {
-        for (const [key, p] of Object.entries(data.diffPages)) {
-          this.pages.set(key, { ...p, key, content: "" });
-        }
-      }
-      if (data.sessions) {
-        const cutoff = Date.now() - SESSION_TTL_MS;
-        for (const [id, session] of Object.entries(data.sessions)) {
-          if (session.lastSeen < cutoff) continue;
-          // A page the store could not restore would render as an empty tab.
-          const pageKeys = new Set(session.pageKeys.filter((k) => this.pages.has(k)));
-          if (pageKeys.size === 0) continue;
-          this.sessions.set(id, {
-            id,
-            entryKey: session.entryKey,
-            activeKey: pageKeys.has(session.activeKey) ? session.activeKey : [...pageKeys][0],
-            pageKeys,
-            lastSeen: session.lastSeen,
-            turns: session.turns || [],
-          });
-        }
-      }
-      for (const page of this.pages.values()) {
-        if (page.kind === "diff") continue;
-        for (const comment of page.comments) reanchor(comment, comment.quote, page.content);
-        for (const edit of page.edits) reanchor(edit, edit.originalText, page.content);
-        this.syncTurnAnchors(page);
-      }
-      if (data.batches) {
-        for (const [k, b] of Object.entries(data.batches)) {
-          this.batches.set(k, b);
-        }
-      }
-    } catch {
-      // First run or missing state file
-    }
+    } catch {}
   }
 }

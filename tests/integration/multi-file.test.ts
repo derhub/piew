@@ -34,43 +34,48 @@ describe("Multi-File Review Integration", () => {
     });
     expect(sessionRes.status).toBe(200);
     const sessionData = await sessionRes.json();
-    expect(sessionData.pageKeys.length).toBe(2);
+    expect(sessionData.reviewMap.items.length).toBe(2);
 
-    const [keyA, keyB] = sessionData.pageKeys;
+    const [keyA, keyB] = sessionData.reviewMap.items.map((item: { pageId: string }) => item.pageId);
 
     // 2. Add comment to file A
-    await fetch(`http://127.0.0.1:${port}/api/page/${keyA}/comment`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        startLine: 1,
-        feedback: "Comment on Doc A",
-      }),
-    });
+    await fetch(
+      `http://127.0.0.1:${port}/api/session/${sessionData.sessionId}/page/${keyA}/comment`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startLine: 1,
+          feedback: "Comment on Doc A",
+        }),
+      }
+    );
 
     // 3. Add comment to file B
-    await fetch(`http://127.0.0.1:${port}/api/page/${keyB}/comment`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        startLine: 1,
-        feedback: "Comment on Doc B",
-      }),
-    });
+    await fetch(
+      `http://127.0.0.1:${port}/api/session/${sessionData.sessionId}/page/${keyB}/comment`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startLine: 1,
+          feedback: "Comment on Doc B",
+        }),
+      }
+    );
 
     // 4. Send feedback
-    await fetch(`http://127.0.0.1:${port}/api/send`, {
+    await fetch(`http://127.0.0.1:${port}/api/session/${sessionData.sessionId}/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        sessionId: sessionData.sessionId,
         overallNote: "Review complete for both documents.",
       }),
     });
 
     // 5. Poll feedback on file A
     const pollRes = await fetch(
-      `http://127.0.0.1:${port}/api/poll?target=${encodeURIComponent(fileA)}`
+      `http://127.0.0.1:${port}/api/session/${sessionData.sessionId}/poll`
     );
     expect(pollRes.status).toBe(200);
     const pollData = await pollRes.json();

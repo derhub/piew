@@ -120,7 +120,7 @@ export function CodeDiffViewer({
   // last file happened to be showing.
   React.useEffect(() => {
     setView(isMarkdown && prefersPreview() ? "preview" : "diff");
-  }, [page.key, isMarkdown]);
+  }, [page.id, isMarkdown]);
 
   const setPreview = (on: boolean) => {
     localStorage.setItem(PREVIEW_KEY, on ? "1" : "0");

@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { test, expect } from "@playwright/test";
 import { openReview, openSession, panelWidth } from "./helpers";
 
@@ -34,5 +36,31 @@ test.describe("on a phone", () => {
 
     await gutter.click();
     await expect(page.getByPlaceholder("Leave a comment")).toBeVisible();
+  });
+
+  test("selecting a Review Map leaf returns to the document", async ({ page, request }) => {
+    const session = await openSession(request);
+    const second = path.join(path.dirname(session.file), "second.md");
+    fs.writeFileSync(second, "# Second review\n\nPhone content.\n");
+    await request.put(`/api/session/${session.sessionId}/map`, {
+      data: {
+        title: "Phone review",
+        items: [
+          {
+            path: "Project/First/fixture.md",
+            source: { kind: "page", pageId: session.pageId },
+          },
+          { path: "Project/Second/second.md", source: { kind: "file", file: second } },
+        ],
+      },
+    });
+    await openReview(page, session);
+
+    await page.getByRole("button", { name: "Show explorer" }).click();
+    await page.getByRole("treeitem", { name: "Second", exact: true }).click();
+    await page.getByRole("treeitem", { name: "second.md", exact: true }).click();
+
+    expect(await panelWidth(page, "explorer")).toBe(0);
+    await expect(page.getByRole("heading", { name: "Second review" })).toBeVisible();
   });
 });

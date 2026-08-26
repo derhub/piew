@@ -8,7 +8,7 @@ describe("Feedback Transcript", () => {
   let port: number;
   let file: string;
   let sessionId: string;
-  let pageKey: string;
+  let pageId: string;
 
   const base = () => `http://127.0.0.1:${port}`;
 
@@ -30,7 +30,7 @@ describe("Feedback Transcript", () => {
 
     const session = await (await post("/api/session", { files: [file] })).json();
     sessionId = session.sessionId;
-    pageKey = session.pageKeys[0];
+    pageId = session.reviewMap.items[0].pageId;
   });
 
   afterAll(() => {
@@ -39,8 +39,11 @@ describe("Feedback Transcript", () => {
   });
 
   it("records each send as its own turn", async () => {
-    await post(`/api/page/${pageKey}/comment`, { startLine: 1, feedback: "first" });
-    await post("/api/send", { sessionId, overallNote: "round one" });
+    await post(`/api/session/${sessionId}/page/${pageId}/comment`, {
+      startLine: 1,
+      feedback: "first",
+    });
+    await post(`/api/session/${sessionId}/send`, { overallNote: "round one" });
 
     const { turns } = await readSession();
 
@@ -50,8 +53,13 @@ describe("Feedback Transcript", () => {
   });
 
   it("carries only the annotations the agent has not seen", async () => {
-    await post(`/api/page/${pageKey}/comment`, { startLine: 2, feedback: "second" });
-    const sent = await (await post("/api/send", { sessionId, overallNote: "round two" })).json();
+    await post(`/api/session/${sessionId}/page/${pageId}/comment`, {
+      startLine: 2,
+      feedback: "second",
+    });
+    const sent = await (
+      await post(`/api/session/${sessionId}/send`, { overallNote: "round two" })
+    ).json();
 
     expect(sent.ok).toBe(true);
 
@@ -61,12 +69,12 @@ describe("Feedback Transcript", () => {
   });
 
   it("keeps the transcript after the agent acks the batch", async () => {
-    await fetch(`${base()}/api/poll?target=${encodeURIComponent(file)}&timeout=1`);
-    await fetch(`${base()}/api/poll?target=${encodeURIComponent(file)}&ack=1&timeout=1`);
+    await fetch(`${base()}/api/session/${sessionId}/poll?timeout=1`);
+    await fetch(`${base()}/api/session/${sessionId}/poll?ack=1&timeout=1`);
 
     const session = await readSession();
 
     expect(session.turns).toHaveLength(2);
-    expect(session.pages[pageKey].comments).toHaveLength(0);
+    expect(session.pages[pageId].comments).toHaveLength(0);
   });
 });

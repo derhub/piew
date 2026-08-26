@@ -50,13 +50,15 @@ describe("Diff restore after a restart", () => {
       body: JSON.stringify({ diff: resolved }),
     }).then((r) => r.json());
 
-    const pageKey = session.pageKeys[0];
-    await api(`/api/page/${pageKey}/comment`, {
+    const pageId = session.reviewMap.items[0].pageId;
+    await api(`/api/session/${session.sessionId}/page/${pageId}/comment`, {
       method: "POST",
       body: JSON.stringify({ startLine: 2, side: "new", feedback: "shouting" }),
     });
 
-    const before = await api(`/api/page/${pageKey}`).then((r) => r.json());
+    const before = await api(`/api/session/${session.sessionId}/page/${pageId}`).then((r) =>
+      r.json()
+    );
 
     // The working tree moves on while the daemon is down: without frozen bytes
     // the comment would land on whatever line 2 says next.
@@ -70,15 +72,17 @@ describe("Diff restore after a restart", () => {
         `http://127.0.0.1:${newPort}/api/session/${session.sessionId}`
       ).then((r) => r.json());
 
-      expect(state.pageKeys).toContain(pageKey);
-      expect(state.pages[pageKey].comments[0]).toMatchObject({
+      expect(state.reviewMap.items.map((item: { pageId: string }) => item.pageId)).toContain(
+        pageId
+      );
+      expect(state.pages[pageId].comments[0]).toMatchObject({
         startLine: 2,
         feedback: "shouting",
       });
 
-      const after = await fetch(`http://127.0.0.1:${newPort}/api/page/${pageKey}`).then((r) =>
-        r.json()
-      );
+      const after = await fetch(
+        `http://127.0.0.1:${newPort}/api/session/${session.sessionId}/page/${pageId}`
+      ).then((r) => r.json());
       expect(after.diff.newContent).toBe(before.diff.newContent);
     } finally {
       restarted.stop();

@@ -46,15 +46,18 @@ describe("piew --wait", () => {
       r.json()
     );
 
-    await fetch(`http://127.0.0.1:${port}/api/page/${session.pageKeys[0]}/comment`, {
+    await fetch(
+      `http://127.0.0.1:${port}/api/session/${sessionId}/page/${session.reviewMap.items[0].pageId}/comment`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startLine: 1, feedback: "tighten this" }),
+      }
+    );
+    await fetch(`http://127.0.0.1:${port}/api/session/${sessionId}/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ startLine: 1, feedback: "tighten this" }),
-    });
-    await fetch(`http://127.0.0.1:${port}/api/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId }),
+      body: JSON.stringify({}),
     });
 
     while (true) {
@@ -64,7 +67,7 @@ describe("piew --wait", () => {
     }
     await proc.exited;
 
-    const batch = JSON.parse(out.slice(out.indexOf("{")));
+    const batch = JSON.parse(out.slice(out.lastIndexOf("\n{") + 1));
     expect(batch.status).toBe("feedback");
     expect(batch.pages[0].comments[0].feedback).toBe("tighten this");
   }, 40_000);

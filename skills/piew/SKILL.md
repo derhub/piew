@@ -40,10 +40,32 @@ source's own syntax.
    piew diff
    ```
 
-3. Wait for feedback. This blocks until they hit Send, or the timeout passes:
+   Open and diff print `Session: s_...` followed by the current Review Map JSON.
+   Keep that session ID: every later command uses it, and the map contains the page
+   IDs needed to reorganize diff pages.
+
+3. Organize a complex review by replacing its whole Review Map. Paths are shown in
+   the supplied order and may have up to five slash-separated segments. A source can
+   reuse a page from the printed map or add an absolute local file:
 
    ```sh
-   piew poll path/to/spec.md --timeout 600
+   echo '{
+     "title": "Release review",
+     "items": [
+       {"path": "Web/Auth/login.ts", "source": {"kind": "page", "pageId": "p_123"}},
+       {"path": "API/Auth/route.ts", "source": {"kind": "file", "file": "/abs/api/route.ts"}}
+     ]
+   }' | piew map s_123
+   ```
+
+   This is a full, atomic replacement. Include every page the reviewer should keep.
+   Missing sources, unsafe or duplicate paths, duplicate pages, and removal of a page
+   with unresolved feedback reject the whole update.
+
+4. Wait for feedback. This blocks until they hit Send, or the timeout passes:
+
+   ```sh
+   piew poll s_123 --timeout 600
    ```
 
    `--wait` on the open command does steps 2 and 3 in one process, which is the
@@ -60,7 +82,7 @@ source's own syntax.
    run the same poll again to keep waiting. Feedback survives a dead poll, so
    nothing is ever lost.
 
-4. Apply what comes back, then answer it. One entry per annotation you were sent,
+5. Apply what comes back, then answer it. One entry per annotation you were sent,
    JSON on stdin:
 
    ```sh
@@ -71,7 +93,7 @@ source's own syntax.
        {"id": "e_3c6e11ff", "status": "skipped", "note": "conflicts with the API contract"},
        {"id": "c_11ff3c6e", "status": "question", "note": "which of the two headings?"}
      ]
-   }' | piew respond path/to/spec.md
+   }' | piew respond s_123
    ```
 
    `status` is `applied`, `skipped`, or `question`. The user sees each verdict on
@@ -81,21 +103,14 @@ source's own syntax.
    A `question` is the only status that keeps an item live: the user answers it as
    a new comment on the same line, which arrives in your next batch.
 
-5. Wait again. `--ack` clears the batch you just handled:
+6. Wait again. `--ack` clears the batch you just handled:
 
    ```sh
-   piew poll path/to/spec.md --ack --timeout 600
+   piew poll s_123 --ack --timeout 600
    ```
 
-Repeat 3-5 until the user says they are done. Poll the file you opened first; one
-batch covers every file in the session.
-
-A diff session has no single file to poll, so `piew diff` prints the target to use.
-It looks like `git:<repo-root>:<range>` - copy it verbatim, quotes included:
-
-```sh
-piew poll "git:/path/to/project:main..feat" --timeout 600
-```
+Repeat 4-6 until the user says they are done. One batch covers every page in the
+session.
 
 A daemon restart keeps the review: pages, comments, and the transcript come back,
 and a diff comes back with the exact bytes that were reviewed rather than whatever
@@ -105,7 +120,7 @@ Not sure whether feedback is already waiting — say, at the start of a new turn
 This answers instantly without blocking:
 
 ```sh
-piew status path/to/spec.md
+piew status s_123
 ```
 
 ```json

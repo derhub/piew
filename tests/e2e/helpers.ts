@@ -24,7 +24,7 @@ Closing paragraph.
 
 export interface Session {
   sessionId: string;
-  pageKey: string;
+  pageId: string;
   file: string;
 }
 
@@ -36,7 +36,7 @@ export async function openSession(request: APIRequestContext, markdown = DOC): P
 
   const res = await request.post("/api/session", { data: { files: [file] } });
   const body = await res.json();
-  return { sessionId: body.sessionId, pageKey: body.pageKeys[0], file };
+  return { sessionId: body.sessionId, pageId: body.reviewMap.items[0].pageId, file };
 }
 
 export async function addComment(
@@ -44,13 +44,16 @@ export async function addComment(
   session: Session,
   input: { startLine: number; feedback: string }
 ): Promise<string> {
-  const res = await request.post(`/api/page/${session.pageKey}/comment`, { data: input });
+  const res = await request.post(
+    `/api/session/${session.sessionId}/page/${session.pageId}/comment`,
+    { data: input }
+  );
   const body = await res.json();
   return body.page.comments.at(-1).id as string;
 }
 
 export async function send(request: APIRequestContext, session: Session, note?: string) {
-  await request.post("/api/send", { data: { sessionId: session.sessionId, overallNote: note } });
+  await request.post(`/api/session/${session.sessionId}/send`, { data: { overallNote: note } });
 }
 
 export async function respond(
@@ -58,7 +61,7 @@ export async function respond(
   session: Session,
   body: { note?: string; items: Array<{ id: string; status: string; note?: string }> }
 ) {
-  await request.post("/api/respond", { data: { ...body, target: session.file } });
+  await request.post(`/api/session/${session.sessionId}/respond`, { data: body });
 }
 
 /**

@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { canonicalTarget, gitTarget, shellQuote, targetKey, stateDataPath } from "./paths";
+import { canonicalTarget, stateDataPath } from "./paths";
 import { ensureDaemonRunning, openBrowser, readServerRecord, isServerAlive } from "./daemon";
 import { resolveDiff } from "./git";
+import type { ReviewMap } from "../lib/types";
 
-/** The target a session is polled by, so --wait can hand it straight to the poll. */
 export async function openCommand(files: string[]): Promise<string> {
   if (files.length === 0) {
     console.error("Usage: piew <file-or-url> [more-files...]");
@@ -34,15 +34,17 @@ export async function openCommand(files: string[]): Promise<string> {
     process.exit(1);
   }
 
-  const body = (await res.json()) as { sessionId: string; path: string };
+  const body = (await res.json()) as { sessionId: string; path: string; reviewMap: ReviewMap };
   const url = `http://127.0.0.1:${daemon.port}${body.path}`;
   openBrowser(url);
 
   console.log(`Reviewing ${validFiles.map((f) => path.basename(f)).join(", ")}`);
   console.log(url);
-  console.log(`\nWaiting for feedback? Run:\n  piew poll ${shellQuote(validFiles[0])}`);
+  console.log(`Session: ${body.sessionId}`);
+  console.log(`Review Map: ${JSON.stringify(body.reviewMap)}`);
+  console.log(`\nWaiting for feedback? Run:\n  piew poll ${body.sessionId}`);
 
-  return validFiles[0];
+  return body.sessionId;
 }
 
 export async function diffCommand(
@@ -76,28 +78,53 @@ export async function diffCommand(
     process.exit(1);
   }
 
-  const body = (await res.json()) as { sessionId: string; path: string };
+  const body = (await res.json()) as { sessionId: string; path: string; reviewMap: ReviewMap };
   const url = `http://127.0.0.1:${daemon.port}${body.path}`;
   openBrowser(url);
 
-  const target = gitTarget(resolved.repoRoot, resolved.range);
   console.log(`Reviewing ${resolved.files.length} file(s) in ${resolved.range}`);
   console.log(url);
-  console.log(`\nWaiting for feedback? Run:\n  piew poll ${shellQuote(target)}`);
+  console.log(`Session: ${body.sessionId}`);
+  console.log(`Review Map: ${JSON.stringify(body.reviewMap)}`);
+  console.log(`\nWaiting for feedback? Run:\n  piew poll ${body.sessionId}`);
 
-  return target;
+  return body.sessionId;
+}
+
+export async function mapCommand(sessionId: string, raw: string): Promise<void> {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch (error: any) {
+    console.error(`Could not read the Review Map JSON: ${error.message}`);
+    process.exit(1);
+    return;
+  }
+  const daemon = await ensureDaemonRunning();
+  const response = await fetch(`http://127.0.0.1:${daemon.port}/api/session/${sessionId}/map`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    reviewMap?: { items?: unknown[] };
+  };
+  if (!response.ok) {
+    console.error(`Review Map update failed: ${body.error || response.statusText}`);
+    process.exit(1);
+  }
+  console.log(`Updated ${body.reviewMap?.items?.length ?? 0} Review Map items`);
 }
 
 export async function pollCommand(
-  targetInput: string,
+  sessionId: string,
   options: { ack?: boolean; timeoutSecs?: number } = {}
 ) {
-  const target = canonicalTarget(targetInput).value;
   const daemon = await ensureDaemonRunning();
 
-  const label = path.basename(target);
   process.stderr.write(
-    `Waiting for feedback on ${label} (comment in browser, then click Send Feedback)...\n`
+    `Waiting for feedback in ${sessionId} (comment in browser, then click Send Feedback)...\n`
   );
 
   // The server caps a single wait below Bun's idleTimeout, so a longer request is
@@ -115,14 +142,15 @@ export async function pollCommand(
     }
 
     const query = new URLSearchParams({
-      target,
       ...(ack ? { ack: "1" } : {}),
       ...(remainingSecs ? { timeout: String(remainingSecs) } : {}),
     });
 
     let batch: any;
     try {
-      const res = await fetch(`http://127.0.0.1:${daemon.port}/api/poll?${query.toString()}`);
+      const res = await fetch(
+        `http://127.0.0.1:${daemon.port}/api/session/${sessionId}/poll?${query.toString()}`
+      );
       if (!res.ok) {
         process.stderr.write(`Poll error: ${res.statusText}\n`);
         process.exit(1);
@@ -147,9 +175,7 @@ export async function pollCommand(
  * The agent's half of the transcript: what it did with each delivered annotation.
  * The payload is read from stdin so a note can hold newlines and quotes freely.
  */
-export async function respondCommand(targetInput: string, raw: string) {
-  const target = canonicalTarget(targetInput).value;
-
+export async function respondCommand(sessionId: string, raw: string) {
   let payload: { note?: string; items?: unknown[] };
   try {
     payload = JSON.parse(raw);
@@ -160,10 +186,10 @@ export async function respondCommand(targetInput: string, raw: string) {
   }
 
   const daemon = await ensureDaemonRunning();
-  const res = await fetch(`http://127.0.0.1:${daemon.port}/api/respond`, {
+  const res = await fetch(`http://127.0.0.1:${daemon.port}/api/session/${sessionId}/respond`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...payload, target }),
+    body: JSON.stringify(payload),
   });
 
   const body = (await res.json().catch(() => ({}))) as { error?: string; unknown?: string[] };
@@ -178,14 +204,11 @@ export async function respondCommand(targetInput: string, raw: string) {
   process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
 }
 
-export async function statusCommand(targetInput: string) {
-  const target = canonicalTarget(targetInput).value;
+export async function statusCommand(sessionId: string) {
   const saved = readServerRecord();
 
   if (saved && (await isServerAlive(saved.port))) {
-    const res = await fetch(
-      `http://127.0.0.1:${saved.port}/api/status?target=${encodeURIComponent(target)}`
-    );
+    const res = await fetch(`http://127.0.0.1:${saved.port}/api/session/${sessionId}/status`);
     if (res.ok) {
       const data = await res.json();
       process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
@@ -194,14 +217,14 @@ export async function statusCommand(targetInput: string) {
   }
 
   // Server offline fallback
-  let data: any = { pages: {}, batches: {} };
+  let data: any = { sessions: {} };
   try {
     data = JSON.parse(fs.readFileSync(stateDataPath(), "utf8"));
   } catch {}
 
-  const key = targetKey(target);
-  const pending = data.batches?.[key];
-  const page = data.pages?.[key];
+  const session = data.sessions?.[sessionId];
+  const pending = session?.pendingBatch;
+  const pages = Object.values(session?.pages ?? {}) as Array<{ comments: any[]; edits: any[] }>;
 
   const payload = {
     status: pending ? "feedback-waiting" : "idle",
@@ -209,8 +232,11 @@ export async function statusCommand(targetInput: string) {
     agent_listening: false,
     server_running: false,
     unsent: {
-      comments: page ? page.comments.length : 0,
-      edits: page ? page.edits.length : 0,
+      comments: pages.reduce(
+        (sum, page) => sum + page.comments.filter((item) => !item.sent).length,
+        0
+      ),
+      edits: pages.reduce((sum, page) => sum + page.edits.filter((item) => !item.sent).length, 0),
     },
   };
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);

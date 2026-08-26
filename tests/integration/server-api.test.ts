@@ -41,40 +41,45 @@ describe("ReviewServer HTTP API", () => {
     expect(sessionRes.status).toBe(200);
     const sessionData = await sessionRes.json();
     expect(sessionData.sessionId).toBeDefined();
-    expect(sessionData.entryKey).toBeDefined();
+    expect(sessionData.activePageId).toBeDefined();
 
-    const pageKey = sessionData.entryKey;
+    const pageId = sessionData.activePageId;
 
     // 2. Add comment
-    const commentRes = await fetch(`http://127.0.0.1:${port}/api/page/${pageKey}/comment`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        startLine: 1,
-        endLine: 1,
-        quote: "Test Document",
-        feedback: "Please make title more descriptive.",
-      }),
-    });
+    const commentRes = await fetch(
+      `http://127.0.0.1:${port}/api/session/${sessionData.sessionId}/page/${pageId}/comment`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startLine: 1,
+          endLine: 1,
+          quote: "Test Document",
+          feedback: "Please make title more descriptive.",
+        }),
+      }
+    );
     expect(commentRes.status).toBe(200);
     const commentBody = await commentRes.json();
     expect(commentBody.comment.feedback).toBe("Please make title more descriptive.");
     expect(commentBody.page.comments.length).toBe(1);
 
     // 3. Send feedback
-    const sendRes = await fetch(`http://127.0.0.1:${port}/api/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: sessionData.sessionId,
-        overallNote: "Overall good.",
-      }),
-    });
+    const sendRes = await fetch(
+      `http://127.0.0.1:${port}/api/session/${sessionData.sessionId}/send`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          overallNote: "Overall good.",
+        }),
+      }
+    );
     expect(sendRes.status).toBe(200);
 
     // 4. Poll feedback
     const pollRes = await fetch(
-      `http://127.0.0.1:${port}/api/poll?target=${encodeURIComponent(testFile)}`
+      `http://127.0.0.1:${port}/api/session/${sessionData.sessionId}/poll`
     );
     expect(pollRes.status).toBe(200);
     const pollData = await pollRes.json();
@@ -85,7 +90,7 @@ describe("ReviewServer HTTP API", () => {
 
     // 5. Acknowledge batch
     const ackRes = await fetch(
-      `http://127.0.0.1:${port}/api/poll?target=${encodeURIComponent(testFile)}&ack=1&timeout=1`
+      `http://127.0.0.1:${port}/api/session/${sessionData.sessionId}/poll?ack=1&timeout=1`
     );
     expect(ackRes.status).toBe(200);
     const ackData = await ackRes.json();
