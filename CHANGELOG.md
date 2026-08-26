@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/derhub/piew/compare/v0.2.0...v0.3.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* add agent-managed review maps
+
+### Features
+
+* add agent-managed review maps ([2063599](https://github.com/derhub/piew/commit/20635992fbc66b627afed1a79ff8bf47ed117897))
+
 ## [0.2.0](https://github.com/derhub/piew/compare/v0.1.2...v0.2.0) (2026-08-23)
 
 
