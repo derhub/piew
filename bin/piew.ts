@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import {
   diffCommand,
+  mapCommand,
   openCommand,
   pollCommand,
   respondCommand,
@@ -15,20 +16,24 @@ Usage:
   piew diff [range]                   Open a git diff for review
       --staged                        Diff the index against HEAD
       --wait                          Open, then block until feedback arrives
-  piew poll <target>                  Wait for human feedback and output JSON (for agents)
+  piew map <session-id>               Replace the Review Map; JSON on stdin
+  piew poll <session-id>              Wait for human feedback and output JSON (for agents)
       --ack                           Acknowledge last batch and keep waiting
       --timeout <secs>                Exit with timeout status if no feedback arrives
-  piew respond <target>               Answer the batch you were given; JSON on stdin
-  piew status <target>                Check whether feedback is waiting without blocking
+  piew respond <session-id>           Answer the batch you were given; JSON on stdin
+  piew status <session-id>            Check whether feedback is waiting without blocking
 
-A diff session is polled by the target the diff command prints, not by a path:
-  piew poll "git:/repo/root:main..feat"
+Open and diff print the session ID used by every follow-up command:
+  piew poll s_123
+
+Replace the whole Review Map with ordered slash paths and existing pages or files:
+  echo '{"title":"Release review","items":[{"path":"Web/Auth/login.ts","source":{"kind":"page","pageId":"p_123"}},{"path":"API/Auth/route.ts","source":{"kind":"file","file":"/abs/api/route.ts"}}]}' | piew map s_123
 
 --wait opens and polls in one command, so a diff needs no target at all:
   piew diff main..feat --wait --timeout 600
 
 respond takes the verdicts on stdin, one entry per annotation you were sent:
-  echo '{"note":"done","items":[{"id":"c_1","status":"applied"}]}' | piew respond spec.md
+  echo '{"note":"done","items":[{"id":"c_1","status":"applied"}]}' | piew respond s_123
 
 Local review tool powered by Bun, TanStack Router, and Base UI.
 `;
@@ -61,7 +66,7 @@ const wait = argv.includes("--wait");
 if (command === "poll") {
   let ack = false;
   let timeoutSecs = 0;
-  let file = "";
+  let sessionId = "";
 
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
@@ -70,39 +75,46 @@ if (command === "poll") {
       timeoutSecs = Number(argv[++i]) || 0;
     } else if (arg.startsWith("--timeout=")) {
       timeoutSecs = Number(arg.slice(10)) || 0;
-    } else if (!arg.startsWith("-") && !file) {
-      file = arg;
+    } else if (!arg.startsWith("-") && !sessionId) {
+      sessionId = arg;
     }
   }
 
-  if (!file) {
-    console.error("Usage: piew poll <file-or-url> [--ack] [--timeout <secs>]");
+  if (!sessionId) {
+    console.error("Usage: piew poll <session-id> [--ack] [--timeout <secs>]");
     process.exit(1);
   }
 
-  await pollCommand(file, { ack, timeoutSecs });
+  await pollCommand(sessionId, { ack, timeoutSecs });
 } else if (command === "diff") {
   const staged = argv.includes("--staged") || argv.includes("--cached");
   const range = argv.slice(1).find((a, i) => !a.startsWith("-") && argv[i] !== "--timeout") || "";
-  const target = await diffCommand(range, { staged });
-  if (wait && target) await pollCommand(target, { timeoutSecs: timeoutFrom(argv) });
+  const sessionId = await diffCommand(range, { staged });
+  if (wait && sessionId) await pollCommand(sessionId, { timeoutSecs: timeoutFrom(argv) });
+} else if (command === "map") {
+  const sessionId = argv.slice(1).find((arg) => !arg.startsWith("-"));
+  if (!sessionId) {
+    console.error("Usage: piew map <session-id> < review-map.json");
+    process.exit(1);
+  }
+  await mapCommand(sessionId, await Bun.stdin.text());
 } else if (command === "respond") {
-  const target = argv.slice(1).find((a) => !a.startsWith("-"));
-  if (!target) {
-    console.error("Usage: piew respond <target> < response.json");
+  const sessionId = argv.slice(1).find((a) => !a.startsWith("-"));
+  if (!sessionId) {
+    console.error("Usage: piew respond <session-id> < response.json");
     process.exit(1);
   }
-  await respondCommand(target, await Bun.stdin.text());
+  await respondCommand(sessionId, await Bun.stdin.text());
 } else if (command === "status") {
-  const file = argv.slice(1).find((a) => !a.startsWith("-"));
-  if (!file) {
-    console.error("Usage: piew status <file-or-url>");
+  const sessionId = argv.slice(1).find((a) => !a.startsWith("-"));
+  if (!sessionId) {
+    console.error("Usage: piew status <session-id>");
     process.exit(1);
   }
-  await statusCommand(file);
+  await statusCommand(sessionId);
 } else {
   // All non-flag arguments are file paths, except the value --timeout takes.
   const files = argv.filter((a, i) => !a.startsWith("-") && argv[i - 1] !== "--timeout");
-  const target = await openCommand(files);
-  if (wait) await pollCommand(target, { timeoutSecs: timeoutFrom(argv) });
+  const sessionId = await openCommand(files);
+  if (wait) await pollCommand(sessionId, { timeoutSecs: timeoutFrom(argv) });
 }

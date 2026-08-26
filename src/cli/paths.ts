@@ -1,9 +1,8 @@
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import crypto from "node:crypto";
 
-export const SERVER_PROTOCOL = 2;
+export const SERVER_PROTOCOL = 3;
 
 export function stateDir(): string {
   const custom = process.env.PIEW_DIR;
@@ -24,12 +23,7 @@ export function serverRecordPath(): string {
 }
 
 export function stateDataPath(): string {
-  return path.join(stateDir(), "state.json");
-}
-
-export function targetKey(target: string): string {
-  const canonical = target.startsWith("git:") ? target : path.resolve(target);
-  return crypto.createHash("sha1").update(canonical).digest("hex").slice(0, 16);
+  return path.join(stateDir(), "state-v3.json");
 }
 
 export type Target =

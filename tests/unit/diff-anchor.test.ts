@@ -19,7 +19,7 @@ describe("diff annotation anchoring", () => {
   let server: ReviewServer;
   let port: number;
   let sessionId: string;
-  let pageKey: string;
+  let pageId: string;
 
   const post = (route: string, body: unknown) =>
     fetch(`http://127.0.0.1:${port}${route}`, {
@@ -35,13 +35,13 @@ describe("diff annotation anchoring", () => {
     const res = await post("/api/session", { diff: RESOLVED });
     const body = await res.json();
     sessionId = body.sessionId;
-    pageKey = body.pageKeys[0];
+    pageId = body.reviewMap.items[0].pageId;
   });
 
   afterAll(() => server.stop());
 
   it("refuses a suggested edit on the old side", async () => {
-    const res = await post(`/api/page/${pageKey}/edit`, {
+    const res = await post(`/api/session/${sessionId}/page/${pageId}/edit`, {
       startLine: 2,
       endLine: 2,
       suggestedText: "const restored = true;",
@@ -49,11 +49,11 @@ describe("diff annotation anchoring", () => {
     });
 
     expect(res.status).toBe(400);
-    expect(server.store.pages.get(pageKey)!.edits).toHaveLength(0);
+    expect(server.store.getPage(sessionId, pageId)!.edits).toHaveLength(0);
   });
 
   it("anchors a new-side edit to the post-image path", async () => {
-    const res = await post(`/api/page/${pageKey}/edit`, {
+    const res = await post(`/api/session/${sessionId}/page/${pageId}/edit`, {
       startLine: 2,
       endLine: 2,
       suggestedText: "const added = false;",
@@ -67,7 +67,7 @@ describe("diff annotation anchoring", () => {
   });
 
   it("anchors an old-side comment to the pre-image path", async () => {
-    const res = await post(`/api/page/${pageKey}/comment`, {
+    const res = await post(`/api/session/${sessionId}/page/${pageId}/comment`, {
       kind: "line_range",
       startLine: 2,
       endLine: 2,
@@ -91,8 +91,8 @@ describe("diff annotation anchoring", () => {
   });
 
   it("forces the side on a file that only has an old path", async () => {
-    const deletedKey = server.store.sessions.get(sessionId)!.pageKeys.values().toArray()[1];
-    const res = await post(`/api/page/${deletedKey}/comment`, {
+    const deletedKey = server.store.sessions.get(sessionId)!.reviewMap.items[1].pageId;
+    const res = await post(`/api/session/${sessionId}/page/${deletedKey}/comment`, {
       kind: "line_range",
       startLine: 1,
       endLine: 1,
@@ -105,8 +105,8 @@ describe("diff annotation anchoring", () => {
   });
 
   it("refuses an edit on a file that has no post-image path", async () => {
-    const deletedKey = server.store.sessions.get(sessionId)!.pageKeys.values().toArray()[1];
-    const res = await post(`/api/page/${deletedKey}/edit`, {
+    const deletedKey = server.store.sessions.get(sessionId)!.reviewMap.items[1].pageId;
+    const res = await post(`/api/session/${sessionId}/page/${deletedKey}/edit`, {
       startLine: 1,
       endLine: 1,
       suggestedText: "resurrect",
@@ -116,22 +116,22 @@ describe("diff annotation anchoring", () => {
   });
 
   it("refuses to refresh a range whose new side is committed", async () => {
-    const res = await post(`/api/page/${pageKey}/refresh`, {});
+    const res = await post(`/api/session/${sessionId}/page/${pageId}/refresh`, {});
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/fixed/);
   });
 
   it("keeps annotations when the same range is opened again", async () => {
-    const before = server.store.pages.get(pageKey)!.comments.length;
+    const before = server.store.getPage(sessionId, pageId)!.comments.length;
     expect(before).toBeGreaterThan(0);
 
     await post("/api/session", { diff: RESOLVED });
 
-    expect(server.store.pages.get(pageKey)!.comments).toHaveLength(before);
+    expect(server.store.getPage(sessionId, pageId)!.comments).toHaveLength(before);
   });
 
   it("edits an unsent comment in place", async () => {
-    const created = await post(`/api/page/${pageKey}/comment`, {
+    const created = await post(`/api/session/${sessionId}/page/${pageId}/comment`, {
       kind: "line_range",
       startLine: 5,
       endLine: 5,
@@ -141,7 +141,7 @@ describe("diff annotation anchoring", () => {
     const { comment } = await created.json();
 
     const patched = await fetch(
-      `http://127.0.0.1:${port}/api/page/${pageKey}/comment/${comment.id}`,
+      `http://127.0.0.1:${port}/api/session/${sessionId}/page/${pageId}/comment/${comment.id}`,
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -150,12 +150,14 @@ describe("diff annotation anchoring", () => {
     );
 
     expect(patched.status).toBe(200);
-    const stored = server.store.pages.get(pageKey)!.comments.find((c) => c.id === comment.id);
+    const stored = server.store
+      .getPage(sessionId, pageId)!
+      .comments.find((c) => c.id === comment.id);
     expect(stored!.feedback).toBe("second wording");
   });
 
   it("refuses to edit or delete a comment the agent already holds", async () => {
-    const created = await post(`/api/page/${pageKey}/comment`, {
+    const created = await post(`/api/session/${sessionId}/page/${pageId}/comment`, {
       kind: "line_range",
       startLine: 6,
       endLine: 6,
@@ -164,10 +166,10 @@ describe("diff annotation anchoring", () => {
     });
     const { comment } = await created.json();
 
-    await post("/api/send", { sessionId });
+    await post(`/api/session/${sessionId}/send`, {});
 
     const patched = await fetch(
-      `http://127.0.0.1:${port}/api/page/${pageKey}/comment/${comment.id}`,
+      `http://127.0.0.1:${port}/api/session/${sessionId}/page/${pageId}/comment/${comment.id}`,
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -175,7 +177,7 @@ describe("diff annotation anchoring", () => {
       }
     );
     const deleted = await fetch(
-      `http://127.0.0.1:${port}/api/page/${pageKey}/comment/${comment.id}`,
+      `http://127.0.0.1:${port}/api/session/${sessionId}/page/${pageId}/comment/${comment.id}`,
       {
         method: "DELETE",
       }
@@ -183,7 +185,9 @@ describe("diff annotation anchoring", () => {
 
     expect(patched.status).toBe(409);
     expect(deleted.status).toBe(409);
-    const stored = server.store.pages.get(pageKey)!.comments.find((c) => c.id === comment.id);
+    const stored = server.store
+      .getPage(sessionId, pageId)!
+      .comments.find((c) => c.id === comment.id);
     expect(stored!.feedback).toBe("about to be sent");
   });
 
@@ -196,16 +200,15 @@ describe("diff annotation anchoring", () => {
   });
 
   it("persists a diff page with its own bytes, not as a path to re-read", () => {
-    const stateFile = path.join(process.env.PIEW_DIR!, "state.json");
+    const stateFile = path.join(process.env.PIEW_DIR!, "state-v3.json");
     const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
 
-    expect(state.pages[pageKey]).toBeUndefined();
-    expect(state.diffPages[pageKey].range).toBeDefined();
+    expect(state.sessions[sessionId].pages[pageId].range).toBeDefined();
   });
 
   it("restores a diff page with its annotations in a fresh store", () => {
     const restarted = new ReviewServer();
-    const page = restarted.store.pages.get(pageKey);
+    const page = restarted.store.getPage(sessionId, pageId);
 
     expect(page?.kind).toBe("diff");
     expect(page?.comments.length).toBeGreaterThan(0);

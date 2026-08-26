@@ -35,9 +35,9 @@ interface FeedbackChatProps {
   pages: Record<string, PageMeta>;
   turns: FeedbackTurn[];
   agentState: AgentState;
-  onJump: (pageKey: string, line?: number, side?: "old" | "new", annotId?: string) => void;
-  onDeleteComment: (pageKey: string, commentId: string) => void;
-  onDeleteEdit: (pageKey: string, editId: string) => void;
+  onJump: (pageId: string, line?: number, side?: "old" | "new", annotId?: string) => void;
+  onDeleteComment: (pageId: string, commentId: string) => void;
+  onDeleteEdit: (pageId: string, editId: string) => void;
   onSendFeedback: (overallNote: string) => Promise<void>;
 }
 
@@ -49,7 +49,7 @@ function pendingItems(pages: Record<string, PageMeta>): FeedbackTurnItem[] {
       items.push({
         id: c.id,
         kind: "comment",
-        pageKey: page.key,
+        pageId: page.id,
         filename: page.filename,
         file: c.file,
         startLine: c.startLine,
@@ -65,7 +65,7 @@ function pendingItems(pages: Record<string, PageMeta>): FeedbackTurnItem[] {
       items.push({
         id: e.id,
         kind: "edit",
-        pageKey: page.key,
+        pageId: page.id,
         filename: page.filename,
         file: e.file,
         startLine: e.startLine,
@@ -124,8 +124,8 @@ export function FeedbackChat({
 
   const handleDelete = (item: FeedbackTurnItem) =>
     item.kind === "comment"
-      ? onDeleteComment(item.pageKey, item.id)
-      : onDeleteEdit(item.pageKey, item.id);
+      ? onDeleteComment(item.pageId, item.id)
+      : onDeleteEdit(item.pageId, item.id);
 
   return (
     <div className="bg-background flex h-full min-h-0 flex-col border-s">
@@ -189,7 +189,7 @@ export function FeedbackChat({
                             onJump={
                               item.orphaned
                                 ? undefined
-                                : () => onJump(item.pageKey, item.startLine, item.side, item.id)
+                                : () => onJump(item.pageId, item.startLine, item.side, item.id)
                             }
                           />
                         ))}
@@ -248,7 +248,7 @@ export function FeedbackChat({
                             onJump={
                               item.orphaned
                                 ? undefined
-                                : () => onJump(item.pageKey, item.startLine, item.side, item.id)
+                                : () => onJump(item.pageId, item.startLine, item.side, item.id)
                             }
                             onDelete={() => handleDelete(item)}
                           />

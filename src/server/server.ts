@@ -1,16 +1,10 @@
 import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { Store } from "./store";
+import { ReviewMapError, Store } from "./store";
 import { FileWatcher } from "./watcher";
 import { readDiffBlobs, type ResolvedDiff } from "../cli/git";
-import {
-  canonicalTarget,
-  ensureStateDir,
-  SERVER_PROTOCOL,
-  serverRecordPath,
-  targetKey,
-} from "../cli/paths";
+import { canonicalTarget, ensureStateDir, SERVER_PROTOCOL, serverRecordPath } from "../cli/paths";
 import type {
   FeedbackTurnItem,
   ItemStatus,
@@ -46,41 +40,21 @@ export class ReviewServer {
   constructor(staticDir?: string) {
     this.staticDir = staticDir || path.resolve(__dirname, "../../dist");
     this.watcher = new FileWatcher((file, content, hash) => {
-      const key = targetKey(file);
-      const page = this.store.pages.get(key);
-      if (page) {
-        this.store.reloadPage(page, content, hash);
-        this.emitSessionEvent(key, "reload", { key, file });
-      }
-
-      // A diff page is keyed by its range, not its path, so it is found by scan.
-      // It only ever gets a staleness flag: swapping its bytes under live
-      // comments would move every anchor they point at. A range whose new side is
-      // a commit cannot drift, so a working-tree edit says nothing about it.
-      for (const [pageKey, candidate] of this.store.pages.entries()) {
-        if (candidate.kind !== "diff" || candidate.file !== file || !candidate.liveHead) continue;
-        candidate.stale = true;
-        this.emitSessionEvent(pageKey, "stale", { key: pageKey, file });
-      }
-    });
-  }
-
-  public emitSessionEvent(pageKey: string, event: string, data: any) {
-    for (const [sid, session] of this.store.sessions.entries()) {
-      if (session.pageKeys.has(pageKey) || session.entryKey === pageKey) {
-        const clients = this.sseClients.get(sid);
-        if (clients) {
-          const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-          for (const c of clients) {
-            try {
-              c.enqueue(new TextEncoder().encode(payload));
-            } catch {
-              clients.delete(c);
-            }
+      for (const [sessionId, session] of this.store.sessions) {
+        for (const page of Object.values(session.pages)) {
+          if (page.file !== file) continue;
+          if (page.kind === "diff") {
+            if (!page.liveHead) continue;
+            page.stale = true;
+            this.emitToSession(sessionId, "stale", { pageId: page.id, file });
+          } else {
+            this.store.reloadPage(page, content, hash);
+            this.emitToSession(sessionId, "reload", { pageId: page.id, file });
           }
         }
       }
-    }
+      this.store.saveToDisk();
+    });
   }
 
   private emitToSession(sessionId: string, event: string, data: any) {
@@ -97,29 +71,29 @@ export class ReviewServer {
     }
   }
 
-  public agentState(entryKey: string): "listening" | "working" | "stranded" | "idle" {
-    const pending = this.store.getBatch(entryKey);
+  public agentState(sessionId: string): "listening" | "working" | "stranded" | "idle" {
+    const pending = this.store.getBatch(sessionId);
     if (pending && pending.delivered) return "working";
-    const pollSet = this.pollers.get(entryKey);
+    const pollSet = this.pollers.get(sessionId);
     if (pollSet && pollSet.size > 0) return "listening";
     return pending ? "stranded" : "idle";
   }
 
-  public broadcastAgentState(entryKey: string) {
-    const state = this.agentState(entryKey);
-    for (const [sid, s] of this.store.sessions.entries()) {
-      if (s.entryKey === entryKey) {
-        this.emitToSession(sid, "agent", { state });
-      }
-    }
+  public broadcastAgentState(sessionId: string) {
+    this.emitToSession(sessionId, "agent", { state: this.agentState(sessionId) });
   }
 
   /**
    * A delivered annotation is the agent's copy of the record; changing it here
    * would leave the two disagreeing with no way to reconcile.
    */
-  private sentAnnotation(key: string, id: string, kind: "comment" | "edit"): Response | null {
-    const page = this.store.pages.get(key);
+  private sentAnnotation(
+    sessionId: string,
+    pageId: string,
+    id: string,
+    kind: "comment" | "edit"
+  ): Response | null {
+    const page = this.store.getPage(sessionId, pageId);
     const found =
       kind === "comment"
         ? page?.comments.find((c) => c.id === id)
@@ -131,8 +105,8 @@ export class ReviewServer {
     );
   }
 
-  public pageMeta(key: string): PageMeta {
-    const page = this.store.pages.get(key)!;
+  public pageMeta(sessionId: string, pageId: string): PageMeta {
+    const page = this.store.getPage(sessionId, pageId)!;
     const { content, diff, ...meta } = page;
     return {
       ...meta,
@@ -144,9 +118,7 @@ export class ReviewServer {
   private markSent(sessionId: string) {
     const session = this.store.sessions.get(sessionId);
     if (!session) return;
-    for (const key of session.pageKeys) {
-      const page = this.store.pages.get(key);
-      if (!page) continue;
+    for (const page of Object.values(session.pages)) {
       for (const comment of page.comments) comment.sent = true;
       for (const edit of page.edits) edit.sent = true;
     }
@@ -158,9 +130,7 @@ export class ReviewServer {
     if (!session) return [];
 
     const pagesFeedback: PageFeedback[] = [];
-    for (const key of session.pageKeys) {
-      const page = this.store.pages.get(key);
-      if (!page) continue;
+    for (const page of Object.values(session.pages)) {
       const pending = page.comments.filter((c) => !c.sent);
       const pendingEdits = page.edits.filter((e) => !e.sent);
       if (pending.length === 0 && pendingEdits.length === 0) continue;
@@ -203,15 +173,13 @@ export class ReviewServer {
     if (!session) return [];
 
     const items: FeedbackTurnItem[] = [];
-    for (const key of session.pageKeys) {
-      const page = this.store.pages.get(key);
-      if (!page) continue;
+    for (const [key, page] of Object.entries(session.pages)) {
       for (const c of page.comments) {
         if (c.sent) continue;
         items.push({
           id: c.id,
           kind: "comment",
-          pageKey: key,
+          pageId: key,
           filename: page.filename,
           file: c.file,
           startLine: c.startLine,
@@ -227,7 +195,7 @@ export class ReviewServer {
         items.push({
           id: e.id,
           kind: "edit",
-          pageKey: key,
+          pageId: key,
           filename: page.filename,
           file: e.file,
           startLine: e.startLine,
@@ -242,8 +210,8 @@ export class ReviewServer {
     return items;
   }
 
-  public deliverBatch(entryKey: string, batch: ReviewBatch): boolean {
-    const pollSet = this.pollers.get(entryKey);
+  public deliverBatch(sessionId: string, batch: ReviewBatch): boolean {
+    const pollSet = this.pollers.get(sessionId);
     if (!pollSet || pollSet.size === 0) return false;
 
     // Copied: the loop deletes from the set it walks.
@@ -322,7 +290,7 @@ export class ReviewServer {
               this.sseClients.get(sid)!.add(controller);
 
               const session = this.store.sessions.get(sid);
-              const state = session ? this.agentState(session.entryKey) : "idle";
+              const state = session ? this.agentState(sid) : "idle";
               const initPayload = `event: agent\ndata: ${JSON.stringify({ state })}\n\n`;
               controller.enqueue(new TextEncoder().encode(initPayload));
             },
@@ -363,16 +331,15 @@ export class ReviewServer {
             const sessionInfo = this.store.createDiffSession(body.diff);
             // Watching is only a staleness signal: a diff page's bytes come from
             // git, never from a reload.
-            for (const key of sessionInfo.pageKeys) {
-              const page = this.store.pages.get(key);
+            const session = this.store.sessions.get(sessionInfo.id)!;
+            for (const page of Object.values(session.pages)) {
               if (page && fs.existsSync(page.file)) this.watcher.watch(page.file);
             }
             return Response.json(
               {
                 sessionId: sessionInfo.id,
-                entryKey: sessionInfo.entryKey,
-                activeKey: sessionInfo.activeKey,
-                pageKeys: sessionInfo.pageKeys,
+                activePageId: sessionInfo.activePageId,
+                reviewMap: sessionInfo.reviewMap,
                 path: `/review/${sessionInfo.id}`,
               },
               { headers: corsHeaders }
@@ -408,9 +375,8 @@ export class ReviewServer {
           return Response.json(
             {
               sessionId: sessionInfo.id,
-              entryKey: sessionInfo.entryKey,
-              activeKey: sessionInfo.activeKey,
-              pageKeys: sessionInfo.pageKeys,
+              activePageId: sessionInfo.activePageId,
+              reviewMap: sessionInfo.reviewMap,
               path: `/review/${sessionInfo.id}`,
             },
             { headers: corsHeaders }
@@ -424,10 +390,11 @@ export class ReviewServer {
             .map((session) => ({
               id: session.id,
               lastSeen: session.lastSeen,
-              kind: this.store.pages.get(session.activeKey)?.kind ?? "markdown",
-              files: [...session.pageKeys]
-                .map((key) => this.store.pages.get(key)?.filename)
-                .filter((name): name is string => !!name),
+              title: session.reviewMap.title,
+              kind: session.pages[session.activePageId]?.kind ?? "markdown",
+              files: session.reviewMap.items
+                .map((item) => session.pages[item.pageId]?.filename)
+                .filter(Boolean),
             }))
             .filter((session) => session.files.length > 0);
 
@@ -450,77 +417,54 @@ export class ReviewServer {
           // Metadata only. Content is fetched per page on open, so a 500-file
           // range costs the same first render as a single document.
           const pages: Record<string, PageMeta> = {};
-          for (const key of session.pageKeys) {
-            const p = this.store.pages.get(key);
-            if (p) pages[key] = this.pageMeta(key);
+          for (const pageId of Object.keys(session.pages)) {
+            pages[pageId] = this.pageMeta(sid, pageId);
           }
 
           return Response.json(
             {
               id: session.id,
-              entryKey: session.entryKey,
-              activeKey: session.activeKey,
-              pageKeys: [...session.pageKeys],
+              activePageId: session.activePageId,
+              reviewMap: session.reviewMap,
               pages,
               turns: session.turns,
-              agentState: this.agentState(session.entryKey),
+              agentState: this.agentState(sid),
             },
             { headers: corsHeaders }
           );
         }
 
-        // POST /api/session/:id/page (open sibling file)
-        const sessionAddMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/page$/);
-        if (sessionAddMatch && req.method === "POST") {
-          const sid = sessionAddMatch[1];
-          const body = (await req.json().catch(() => ({}))) as { file: string };
-          if (!body.file) {
+        const mapMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/map$/);
+        if (mapMatch && req.method === "PUT") {
+          try {
+            const info = this.store.replaceReviewMap(mapMatch[1], await req.json());
+            const session = this.store.sessions.get(info.id)!;
+            for (const page of Object.values(session.pages)) {
+              if (page.kind !== "diff") this.watcher.watch(page.file);
+            }
+            this.emitToSession(info.id, "refresh", { reviewMap: info.reviewMap });
             return Response.json(
-              { error: "Missing file path" },
+              { reviewMap: info.reviewMap, activePageId: info.activePageId },
+              { headers: corsHeaders }
+            );
+          } catch (error) {
+            if (error instanceof ReviewMapError) {
+              return Response.json(
+                { error: error.message },
+                { status: error.status, headers: corsHeaders }
+              );
+            }
+            return Response.json(
+              { error: "Invalid Review Map" },
               { status: 400, headers: corsHeaders }
             );
           }
-
-          const session = this.store.sessions.get(sid);
-          if (!session) {
-            return Response.json(
-              { error: "Session not found" },
-              { status: 404, headers: corsHeaders }
-            );
-          }
-
-          let resolvedPath = body.file;
-          if (!path.isAbsolute(body.file)) {
-            const activePage = this.store.pages.get(session.activeKey);
-            const baseDir = activePage ? path.dirname(activePage.file) : process.cwd();
-            resolvedPath = path.resolve(baseDir, body.file);
-          }
-
-          const canonical = canonicalTarget(resolvedPath);
-          if (!fs.existsSync(canonical.value)) {
-            return Response.json(
-              { error: `File not found: ${canonical.value}` },
-              { status: 404, headers: corsHeaders }
-            );
-          }
-
-          this.watcher.watch(canonical.value);
-          const page = this.store.addPageToSession(sid, canonical.value);
-          if (!page) {
-            return Response.json(
-              { error: "Could not open document" },
-              { status: 500, headers: corsHeaders }
-            );
-          }
-
-          this.emitToSession(sid, "refresh", { activeKey: page.key });
-          return Response.json({ page }, { headers: corsHeaders });
         }
 
-        // GET /api/page/:key (content, fetched when a page is opened)
-        const pageMatch = route.match(/^\/api\/page\/([a-f0-9]+)$/);
+        const pageMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/page\/([a-zA-Z0-9_]+)$/);
         if (pageMatch && req.method === "GET") {
-          const page = this.store.pages.get(pageMatch[1]);
+          const [, sid, pageId] = pageMatch;
+          const page = this.store.getPage(sid, pageId);
           if (!page)
             return Response.json(
               { error: "Page not found" },
@@ -540,7 +484,7 @@ export class ReviewServer {
             // working-tree side can move under the comments anchored to it, so the
             // first read freezes it: without that, a restart would re-read the file
             // and point every anchor at whatever it says now.
-            // ponytail: frozen blobs ride in state.json; a blob store is only worth
+            // ponytail: frozen blobs ride in state-v3.json; a blob store is only worth
             // it once ranges over huge files start hurting.
             const frozen =
               page.liveHead &&
@@ -559,22 +503,23 @@ export class ReviewServer {
               }
             }
             return Response.json(
-              { key: page.key, kind: page.kind, diff, hash: page.hash },
+              { id: page.id, kind: page.kind, diff, hash: page.hash },
               { headers: corsHeaders }
             );
           }
 
           return Response.json(
-            { key: page.key, kind: page.kind, content: page.content, hash: page.hash },
+            { id: page.id, kind: page.kind, content: page.content, hash: page.hash },
             { headers: corsHeaders }
           );
         }
 
-        // POST /api/page/:key/refresh (re-run the diff for one stale page)
-        const refreshMatch = route.match(/^\/api\/page\/([a-f0-9]+)\/refresh$/);
+        const refreshMatch = route.match(
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/page\/([a-zA-Z0-9_]+)\/refresh$/
+        );
         if (refreshMatch && req.method === "POST") {
-          const key = refreshMatch[1];
-          const page = this.store.pages.get(key);
+          const [, sid, pageId] = refreshMatch;
+          const page = this.store.getPage(sid, pageId);
           if (!page || page.kind !== "diff" || !page.diff) {
             return Response.json(
               { error: "Not a diff page" },
@@ -596,14 +541,15 @@ export class ReviewServer {
           page.comments = [];
           page.edits = [];
           page.stale = false;
-          this.emitSessionEvent(key, "refresh", {});
+          this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ ok: true }, { headers: corsHeaders });
         }
 
-        // POST /api/page/:key/comment
-        const commentMatch = route.match(/^\/api\/page\/([a-f0-9]+)\/comment$/);
+        const commentMatch = route.match(
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/page\/([a-zA-Z0-9_]+)\/comment$/
+        );
         if (commentMatch && req.method === "POST") {
-          const key = commentMatch[1];
+          const [, sid, pageId] = commentMatch;
           const body = (await req.json().catch(() => ({}))) as Partial<ReviewComment>;
           if (!body.feedback?.trim()) {
             return Response.json(
@@ -622,7 +568,7 @@ export class ReviewServer {
             createdAt: Date.now(),
           };
 
-          const commentPage = this.store.pages.get(key);
+          const commentPage = this.store.getPage(sid, pageId);
           if (commentPage?.kind === "diff" && commentPage.diff) {
             // A one-sided file has only one answer, so an omitted or wrong side
             // is corrected rather than left pointing at a path that does not exist.
@@ -632,23 +578,22 @@ export class ReviewServer {
             comment.file = side === "old" ? oldPath : newPath;
           }
 
-          const page = this.store.addComment(key, comment);
+          const page = this.store.addComment(sid, pageId, comment);
           if (!page)
             return Response.json(
               { error: "Page not found" },
               { status: 404, headers: corsHeaders }
             );
 
-          this.emitSessionEvent(key, "refresh", { page });
+          this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ comment, page }, { headers: corsHeaders });
         }
 
-        // PATCH /api/page/:key/comment/:id
         const commentPatchMatch = route.match(
-          /^\/api\/page\/([a-f0-9]+)\/comment\/([a-zA-Z0-9_]+)$/
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/page\/([a-zA-Z0-9_]+)\/comment\/([a-zA-Z0-9_]+)$/
         );
         if (commentPatchMatch && req.method === "PATCH") {
-          const [, key, commentId] = commentPatchMatch;
+          const [, sid, pageId, commentId] = commentPatchMatch;
           const body = (await req.json().catch(() => ({}))) as { feedback?: string };
           if (!body.feedback?.trim()) {
             return Response.json(
@@ -656,24 +601,25 @@ export class ReviewServer {
               { status: 400, headers: corsHeaders }
             );
           }
-          const frozen = this.sentAnnotation(key, commentId, "comment");
+          const frozen = this.sentAnnotation(sid, pageId, commentId, "comment");
           if (frozen) return frozen;
 
-          const page = this.store.updateComment(key, commentId, body.feedback.trim());
+          const page = this.store.updateComment(sid, pageId, commentId, body.feedback.trim());
           if (!page)
             return Response.json(
               { error: "Comment not found" },
               { status: 404, headers: corsHeaders }
             );
 
-          this.emitSessionEvent(key, "refresh", { page });
+          this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ ok: true, page }, { headers: corsHeaders });
         }
 
-        // PATCH /api/page/:key/edit/:id
-        const editPatchMatch = route.match(/^\/api\/page\/([a-f0-9]+)\/edit\/([a-zA-Z0-9_]+)$/);
+        const editPatchMatch = route.match(
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/page\/([a-zA-Z0-9_]+)\/edit\/([a-zA-Z0-9_]+)$/
+        );
         if (editPatchMatch && req.method === "PATCH") {
-          const [, key, editId] = editPatchMatch;
+          const [, sid, pageId, editId] = editPatchMatch;
           const body = (await req.json().catch(() => ({}))) as { suggestedText?: string };
           if (!body.suggestedText?.trim()) {
             return Response.json(
@@ -681,42 +627,42 @@ export class ReviewServer {
               { status: 400, headers: corsHeaders }
             );
           }
-          const frozen = this.sentAnnotation(key, editId, "edit");
+          const frozen = this.sentAnnotation(sid, pageId, editId, "edit");
           if (frozen) return frozen;
 
-          const page = this.store.updateEdit(key, editId, body.suggestedText.trim());
+          const page = this.store.updateEdit(sid, pageId, editId, body.suggestedText.trim());
           if (!page)
             return Response.json(
               { error: "Edit not found" },
               { status: 404, headers: corsHeaders }
             );
 
-          this.emitSessionEvent(key, "refresh", { page });
+          this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ ok: true, page }, { headers: corsHeaders });
         }
 
-        // DELETE /api/page/:key/comment/:id
-        const commentDelMatch = route.match(/^\/api\/page\/([a-f0-9]+)\/comment\/([a-zA-Z0-9_]+)$/);
+        const commentDelMatch = commentPatchMatch;
         if (commentDelMatch && req.method === "DELETE") {
-          const [, key, commentId] = commentDelMatch;
-          const frozen = this.sentAnnotation(key, commentId, "comment");
+          const [, sid, pageId, commentId] = commentDelMatch;
+          const frozen = this.sentAnnotation(sid, pageId, commentId, "comment");
           if (frozen) return frozen;
 
-          const page = this.store.removeComment(key, commentId);
+          const page = this.store.removeComment(sid, pageId, commentId);
           if (!page)
             return Response.json(
               { error: "Page not found" },
               { status: 404, headers: corsHeaders }
             );
 
-          this.emitSessionEvent(key, "refresh", { page });
+          this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ ok: true, page }, { headers: corsHeaders });
         }
 
-        // POST /api/page/:key/edit
-        const editMatch = route.match(/^\/api\/page\/([a-f0-9]+)\/edit$/);
+        const editMatch = route.match(
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/page\/([a-zA-Z0-9_]+)\/edit$/
+        );
         if (editMatch && req.method === "POST") {
-          const key = editMatch[1];
+          const [, sid, pageId] = editMatch;
           // `side` arrives from the client unvalidated: an "old" here is a bug to
           // reject, not a value ReviewEdit is allowed to hold.
           const body = (await req.json().catch(() => ({}))) as Omit<Partial<ReviewEdit>, "side"> & {
@@ -737,7 +683,7 @@ export class ReviewServer {
             suggestedText: body.suggestedText,
           };
 
-          const editPage = this.store.pages.get(key);
+          const editPage = this.store.getPage(sid, pageId);
           if (editPage?.kind === "diff" && editPage.diff) {
             // An old-side line has no post-image counterpart, so no edit can name
             // a line to patch. Comments carry that feedback instead.
@@ -751,42 +697,41 @@ export class ReviewServer {
             if (editPage.diff.newPath) edit.file = editPage.diff.newPath;
           }
 
-          const page = this.store.addEdit(key, edit);
+          const page = this.store.addEdit(sid, pageId, edit);
           if (!page)
             return Response.json(
               { error: "Page not found" },
               { status: 404, headers: corsHeaders }
             );
 
-          this.emitSessionEvent(key, "refresh", { page });
+          this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ edit, page }, { headers: corsHeaders });
         }
 
-        // DELETE /api/page/:key/edit/:id
-        const editDelMatch = route.match(/^\/api\/page\/([a-f0-9]+)\/edit\/([a-zA-Z0-9_]+)$/);
+        const editDelMatch = editPatchMatch;
         if (editDelMatch && req.method === "DELETE") {
-          const [, key, editId] = editDelMatch;
-          const frozen = this.sentAnnotation(key, editId, "edit");
+          const [, sid, pageId, editId] = editDelMatch;
+          const frozen = this.sentAnnotation(sid, pageId, editId, "edit");
           if (frozen) return frozen;
 
-          const page = this.store.removeEdit(key, editId);
+          const page = this.store.removeEdit(sid, pageId, editId);
           if (!page)
             return Response.json(
               { error: "Page not found" },
               { status: 404, headers: corsHeaders }
             );
 
-          this.emitSessionEvent(key, "refresh", { page });
+          this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ ok: true, page }, { headers: corsHeaders });
         }
 
-        // POST /api/send
-        if (route === "/api/send" && req.method === "POST") {
+        const sendMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/send$/);
+        if (sendMatch && req.method === "POST") {
           const body = (await req.json().catch(() => ({}))) as {
-            sessionId: string;
             overallNote?: string;
           };
-          const session = this.store.sessions.get(body.sessionId);
+          const sessionId = sendMatch[1];
+          const session = this.store.sessions.get(sessionId);
           if (!session) {
             return Response.json(
               { error: "Session not found" },
@@ -794,7 +739,7 @@ export class ReviewServer {
             );
           }
 
-          const pagesFeedback = this.collectFeedback(body.sessionId);
+          const pagesFeedback = this.collectFeedback(sessionId);
           if (pagesFeedback.length === 0 && !body.overallNote?.trim()) {
             return Response.json(
               { error: "No feedback or note to send" },
@@ -811,12 +756,12 @@ export class ReviewServer {
               "Apply this feedback to the respective files. When done, run poll --ack to clear.",
           };
 
-          const turnItems = this.pendingTurnItems(body.sessionId);
-          this.markSent(body.sessionId);
-          this.store.setBatch(session.entryKey, batch);
-          const delivered = this.deliverBatch(session.entryKey, batch);
+          const turnItems = this.pendingTurnItems(sessionId);
+          this.markSent(sessionId);
+          this.store.setBatch(sessionId, batch);
+          const delivered = this.deliverBatch(sessionId, batch);
           if (delivered) {
-            const entry = this.store.batches.get(session.entryKey);
+            const entry = this.store.getBatch(sessionId);
             if (entry) entry.delivered = true;
           }
 
@@ -829,23 +774,21 @@ export class ReviewServer {
           });
 
           this.store.saveToDisk();
-          this.broadcastAgentState(session.entryKey);
+          this.broadcastAgentState(sessionId);
           return Response.json({ ok: true, delivered }, { headers: corsHeaders });
         }
 
-        // POST /api/respond
-        if (route === "/api/respond" && req.method === "POST") {
+        const respondMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/respond$/);
+        if (respondMatch && req.method === "POST") {
           const body = (await req.json().catch(() => ({}))) as {
-            target?: string;
             note?: string;
             items?: Array<{ id: string; status: ItemStatus; note?: string }>;
           };
-
-          const entryKey = targetKey(canonicalTarget(body.target || "").value);
-          const sessions = [...this.store.sessions.values()].filter((s) => s.entryKey === entryKey);
-          if (sessions.length === 0) {
+          const sessionId = respondMatch[1];
+          const session = this.store.sessions.get(sessionId);
+          if (!session) {
             return Response.json(
-              { error: "No session for that target" },
+              { error: "Session not found" },
               { status: 404, headers: corsHeaders }
             );
           }
@@ -857,7 +800,7 @@ export class ReviewServer {
               unknown.push(entry?.id ?? "");
               continue;
             }
-            const hit = this.store.setItemStatus(entryKey, entry.id, entry.status, entry.note);
+            const hit = this.store.setItemStatus(sessionId, entry.id, entry.status, entry.note);
             if (!hit) {
               unknown.push(entry.id);
               continue;
@@ -867,7 +810,7 @@ export class ReviewServer {
               id: item.id,
               kind: "suggestedText" in item ? "edit" : "comment",
               status: entry.status,
-              pageKey: page.key,
+              pageId: page.id,
               filename: page.filename,
               file: item.file,
               startLine: item.startLine,
@@ -875,7 +818,7 @@ export class ReviewServer {
               feedback: entry.note,
               orphaned: item.orphaned,
             });
-            this.emitSessionEvent(page.key, "refresh", { page });
+            this.emitToSession(sessionId, "refresh", { pageId: page.id });
           }
 
           if (items.length || body.note?.trim()) {
@@ -887,51 +830,47 @@ export class ReviewServer {
               delivered: true,
               items,
             };
-            // Every browser on this target is looking at the same exchange.
-            for (const session of sessions) session.turns.push({ ...turn });
+            session.turns.push(turn);
             this.store.saveToDisk();
-            this.emitSessionEvent(entryKey, "refresh", {});
+            this.emitToSession(sessionId, "refresh", {});
           }
 
           return Response.json({ ok: true, unknown }, { headers: corsHeaders });
         }
 
-        // GET /api/poll?target=<path>&ack=<1|0>&timeout=<seconds>
-        if (route === "/api/poll" && req.method === "GET") {
-          const target = url.searchParams.get("target") || url.searchParams.get("file") || "";
-          if (!target) {
+        const pollMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/poll$/);
+        if (pollMatch && req.method === "GET") {
+          const sessionId = pollMatch[1];
+          if (!this.store.sessions.has(sessionId)) {
             return Response.json(
-              { error: "Missing target parameter" },
-              { status: 400, headers: corsHeaders }
+              { error: "Session not found" },
+              { status: 404, headers: corsHeaders }
             );
           }
-
-          const canonical = canonicalTarget(target);
-          const entryKey = targetKey(canonical.value);
           const ack = url.searchParams.get("ack") === "1";
           const timeoutSecs = Number(url.searchParams.get("timeout")) || 0;
 
-          const pending = this.store.getBatch(entryKey);
+          const pending = this.store.getBatch(sessionId);
 
           // ack clears the batch the caller already handled. A batch that was never
           // delivered is not that batch: hand it over instead of destroying it.
           if (ack && pending?.delivered) {
-            this.store.clearBatch(entryKey);
-            this.store.clearSentFeedback(entryKey);
-            this.emitSessionEvent(entryKey, "refresh", {});
-            this.broadcastAgentState(entryKey);
+            this.store.clearBatch(sessionId);
+            this.store.clearSentFeedback(sessionId);
+            this.emitToSession(sessionId, "refresh", {});
+            this.broadcastAgentState(sessionId);
           } else if (ack && !pending) {
-            this.store.clearSentFeedback(entryKey);
-            this.emitSessionEvent(entryKey, "refresh", {});
-            this.broadcastAgentState(entryKey);
+            this.store.clearSentFeedback(sessionId);
+            this.emitToSession(sessionId, "refresh", {});
+            this.broadcastAgentState(sessionId);
           }
 
           // Re-serve an unacked batch as often as asked: a poll whose response was lost
           // must be able to fetch it again.
-          const undelivered = this.store.getBatch(entryKey);
+          const undelivered = this.store.getBatch(sessionId);
           if (undelivered) {
             undelivered.delivered = true;
-            this.broadcastAgentState(entryKey);
+            this.broadcastAgentState(sessionId);
             return Response.json(undelivered.batch, { headers: corsHeaders });
           }
 
@@ -940,8 +879,8 @@ export class ReviewServer {
           const waitSecs = timeoutSecs > 0 ? Math.min(timeoutSecs, MAX_POLL_SECS) : 0;
 
           return new Promise<Response>((resolve) => {
-            if (!this.pollers.has(entryKey)) {
-              this.pollers.set(entryKey, new Set());
+            if (!this.pollers.has(sessionId)) {
+              this.pollers.set(sessionId, new Set());
             }
 
             let timer: any = null;
@@ -967,31 +906,35 @@ export class ReviewServer {
 
             if (waitSecs > 0) {
               timer = setTimeout(() => {
-                const pollSet = this.pollers.get(entryKey);
+                const pollSet = this.pollers.get(sessionId);
                 if (pollSet) pollSet.delete(pollerRecord);
                 pollerRecord.resolve(null);
-                this.broadcastAgentState(entryKey);
+                this.broadcastAgentState(sessionId);
               }, waitSecs * 1000);
               pollerRecord.timer = timer;
             }
 
-            this.pollers.get(entryKey)!.add(pollerRecord);
-            this.broadcastAgentState(entryKey);
+            this.pollers.get(sessionId)!.add(pollerRecord);
+            this.broadcastAgentState(sessionId);
           });
         }
 
-        // GET /api/status?target=<path>
-        if (route === "/api/status" && req.method === "GET") {
-          const target = url.searchParams.get("target") || url.searchParams.get("file") || "";
-          const canonical = canonicalTarget(target);
-          const entryKey = targetKey(canonical.value);
-
-          const pending = this.store.getBatch(entryKey);
-          const listening = (this.pollers.get(entryKey) || new Set()).size > 0;
+        const statusMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/status$/);
+        if (statusMatch && req.method === "GET") {
+          const sessionId = statusMatch[1];
+          const session = this.store.sessions.get(sessionId);
+          if (!session) {
+            return Response.json(
+              { error: "Session not found" },
+              { status: 404, headers: corsHeaders }
+            );
+          }
+          const pending = this.store.getBatch(sessionId);
+          const listening = (this.pollers.get(sessionId) || new Set()).size > 0;
 
           let unsentComments = 0;
           let unsentEdits = 0;
-          for (const p of this.store.pages.values()) {
+          for (const p of Object.values(session.pages)) {
             unsentComments += p.comments.filter((c) => !c.sent).length;
             unsentEdits += p.edits.filter((e) => !e.sent).length;
           }

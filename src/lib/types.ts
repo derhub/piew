@@ -56,7 +56,7 @@ export interface ReviewEdit {
 }
 
 export interface PageData {
-  key: string;
+  id: string;
   file: string;
   filename: string;
   kind: PageKind;
@@ -97,7 +97,7 @@ export interface FeedbackTurnItem {
   id: string;
   kind: "comment" | "edit";
   status?: ItemStatus;
-  pageKey: string;
+  pageId: string;
   filename: string;
   file?: string;
   startLine?: number;
@@ -123,9 +123,35 @@ export interface FeedbackTurn {
 
 export interface SessionInfo {
   id: string;
-  entryKey: string;
-  activeKey: string;
-  pageKeys: string[];
+  activePageId: string;
+  reviewMap: ReviewMap;
+}
+
+export interface ReviewMap {
+  title: string;
+  items: ReviewMapItem[];
+}
+
+export interface ReviewMapItem {
+  pageId: string;
+  path: string;
+}
+
+export type ReviewMapSource = { kind: "page"; pageId: string } | { kind: "file"; file: string };
+
+export interface ReplaceReviewMapRequest {
+  title: string;
+  items: Array<{ path: string; source: ReviewMapSource }>;
+}
+
+export interface ReviewSession {
+  id: string;
+  activePageId: string;
+  reviewMap: ReviewMap;
+  pages: Record<string, PageData>;
+  lastSeen: number;
+  turns: FeedbackTurn[];
+  pendingBatch?: { batch: ReviewBatch; delivered: boolean };
 }
 
 export interface AgentStatus {

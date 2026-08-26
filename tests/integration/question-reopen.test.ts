@@ -31,47 +31,46 @@ describe("Answering an agent question", () => {
       method: "POST",
       body: JSON.stringify({ files: [file] }),
     }).then((r) => r.json());
-    const pageKey = session.pageKeys[0];
+    const pageId = session.reviewMap.items[0].pageId;
 
-    const posted = await api(`/api/page/${pageKey}/comment`, {
+    const posted = await api(`/api/session/${session.sessionId}/page/${pageId}/comment`, {
       method: "POST",
       body: JSON.stringify({ startLine: 3, feedback: "rewrite this" }),
     }).then((r) => r.json());
     const commentId = posted.page.comments.at(-1).id as string;
 
-    await api("/api/send", {
+    await api(`/api/session/${session.sessionId}/send`, {
       method: "POST",
-      body: JSON.stringify({ sessionId: session.sessionId }),
+      body: JSON.stringify({}),
     });
-    await api("/api/respond", {
+    await api(`/api/session/${session.sessionId}/respond`, {
       method: "POST",
       body: JSON.stringify({
-        target: file,
         items: [{ id: commentId, status, note: "which paragraph?" }],
       }),
     });
 
-    return { session, pageKey, commentId };
+    return { session, pageId, commentId };
   }
 
   it("takes the answer as a new unsent comment on the same line", async () => {
-    const { session, pageKey } = await askedQuestion("question");
+    const { session, pageId } = await askedQuestion("question");
 
-    await api(`/api/page/${pageKey}/comment`, {
+    await api(`/api/session/${session.sessionId}/page/${pageId}/comment`, {
       method: "POST",
       body: JSON.stringify({ startLine: 3, feedback: "the second one" }),
     });
 
     const state = await api(`/api/session/${session.sessionId}`).then((r) => r.json());
-    const unsent = state.pages[pageKey].comments.filter((c: any) => !c.sent);
+    const unsent = state.pages[pageId].comments.filter((c: any) => !c.sent);
     expect(unsent).toHaveLength(1);
     expect(unsent[0]).toMatchObject({ startLine: 3, feedback: "the second one" });
   });
 
   it("keeps the answered item itself frozen", async () => {
-    const { pageKey, commentId } = await askedQuestion("question");
+    const { session, pageId, commentId } = await askedQuestion("question");
 
-    const res = await api(`/api/page/${pageKey}/comment/${commentId}`, {
+    const res = await api(`/api/session/${session.sessionId}/page/${pageId}/comment/${commentId}`, {
       method: "PATCH",
       body: JSON.stringify({ feedback: "changed my mind" }),
     });
@@ -80,9 +79,9 @@ describe("Answering an agent question", () => {
   });
 
   it("keeps an applied item frozen too", async () => {
-    const { pageKey, commentId } = await askedQuestion("applied");
+    const { session, pageId, commentId } = await askedQuestion("applied");
 
-    const res = await api(`/api/page/${pageKey}/comment/${commentId}`, {
+    const res = await api(`/api/session/${session.sessionId}/page/${pageId}/comment/${commentId}`, {
       method: "DELETE",
     });
 

@@ -16,7 +16,7 @@ import { ShortcutSheet } from "~/components/ShortcutSheet";
 import { FindBar } from "~/components/FindBar";
 import { useHotkeys } from "~/hooks/use-hotkeys";
 import type { ViewerHandle } from "~/components/Annotation";
-import type { DiffFile, FeedbackTurn, PageMeta } from "~/lib/types";
+import type { DiffFile, FeedbackTurn, PageMeta, ReviewMap } from "~/lib/types";
 
 export const Route = createRoute({
   getParentRoute: () => rootRoute,
@@ -26,11 +26,10 @@ export const Route = createRoute({
 
 interface SessionState {
   id: string;
-  entryKey: string;
-  activeKey: string;
+  activePageId: string;
+  reviewMap: ReviewMap;
   agentState: "idle" | "listening" | "working" | "stranded";
   pages: Record<string, PageMeta>;
-  pageKeys: string[];
   turns: FeedbackTurn[];
 }
 
@@ -153,7 +152,9 @@ function ReviewSessionComponent() {
       if (!res.ok) throw new Error(`Failed to load session: ${res.statusText}`);
       const data: SessionState = await res.json();
       setSession(data);
-      setActiveKey((prev) => prev || data.pageKeys?.[0] || "");
+      setActiveKey((prev) =>
+        prev && data.pages[prev] ? prev : data.activePageId || data.reviewMap.items[0]?.pageId || ""
+      );
       setLoading(false);
     } catch (err: any) {
       setError(err.message || "Failed to load session");
@@ -165,12 +166,15 @@ function ReviewSessionComponent() {
 
   // Content is fetched per page on open, so the session payload stays flat no
   // matter how many files the range touches.
-  const loadContent = React.useCallback(async (key: string) => {
-    const res = await fetch(`/api/page/${key}`);
-    if (!res.ok) return;
-    const body: PageContent = await res.json();
-    setContents((prev) => ({ ...prev, [key]: body }));
-  }, []);
+  const loadContent = React.useCallback(
+    async (key: string) => {
+      const res = await fetch(`/api/session/${sessionId}/page/${key}`);
+      if (!res.ok) return;
+      const body: PageContent = await res.json();
+      setContents((prev) => ({ ...prev, [key]: body }));
+    },
+    [sessionId]
+  );
 
   React.useEffect(() => {
     if (activeKey) void loadContent(activeKey);
@@ -185,8 +189,8 @@ function ReviewSessionComponent() {
     eventSource.addEventListener("stale", refresh);
     eventSource.addEventListener("reload", (event) => {
       try {
-        const { key } = JSON.parse((event as MessageEvent).data);
-        if (key) void loadContent(key);
+        const { pageId } = JSON.parse((event as MessageEvent).data);
+        if (pageId) void loadContent(pageId);
       } catch {
         /* malformed frame */
       }
@@ -206,6 +210,7 @@ function ReviewSessionComponent() {
 
   const activePage = session?.pages[activeKey];
   const activeContent = contents[activeKey];
+  const activeMapPath = session?.reviewMap.items.find((item) => item.pageId === activeKey)?.path;
   const explorerRef = React.useRef<PanelImperativeHandle | null>(null);
   const [explorerCollapsed, setExplorerCollapsed] = React.useState(false);
   const [toolbarSlot, setToolbarSlot] = React.useState<HTMLDivElement | null>(null);
@@ -225,13 +230,16 @@ function ReviewSessionComponent() {
   const handleRefreshPage = React.useCallback(async () => {
     if (!activeKey) return;
     if (!window.confirm("Re-running this diff drops the annotations on it. Continue?")) return;
-    const res = await fetch(`/api/page/${activeKey}/refresh`, { method: "POST" });
+    const res = await fetch(`/api/session/${sessionId}/page/${activeKey}/refresh`, {
+      method: "POST",
+    });
     if (res.ok) await loadContent(activeKey);
-  }, [activeKey, loadContent]);
+  }, [activeKey, loadContent, sessionId]);
 
   // Opening another document should start at its top, not inherit the last scroll offset.
   const selectPage = React.useCallback((key: string) => {
     setActiveKey(key);
+    setOverlay(null);
     window.scrollTo({ top: 0 });
   }, []);
 
@@ -250,54 +258,61 @@ function ReviewSessionComponent() {
   const handleAddComment = React.useCallback(
     (comment: Parameters<React.ComponentProps<typeof MarkdownViewer>["onAddComment"]>[0]) => {
       if (!activeKey) return;
-      void call(`/api/page/${activeKey}/comment`, {
+      void call(`/api/session/${sessionId}/page/${activeKey}/comment`, {
         method: "POST",
         body: JSON.stringify(comment),
       });
     },
-    [activeKey, call]
+    [activeKey, call, sessionId]
   );
 
   const handleAddEdit = React.useCallback(
     (edit: Parameters<React.ComponentProps<typeof MarkdownViewer>["onAddEdit"]>[0]) => {
       if (!activeKey) return;
-      void call(`/api/page/${activeKey}/edit`, { method: "POST", body: JSON.stringify(edit) });
+      void call(`/api/session/${sessionId}/page/${activeKey}/edit`, {
+        method: "POST",
+        body: JSON.stringify(edit),
+      });
     },
-    [activeKey, call]
+    [activeKey, call, sessionId]
   );
 
   const deleteComment = React.useCallback(
-    (pageKey: string, commentId: string) => {
-      void call(`/api/page/${pageKey}/comment/${commentId}`, { method: "DELETE" });
+    (pageId: string, commentId: string) => {
+      void call(`/api/session/${sessionId}/page/${pageId}/comment/${commentId}`, {
+        method: "DELETE",
+      });
     },
-    [call]
+    [call, sessionId]
   );
 
   const deleteEdit = React.useCallback(
-    (pageKey: string, editId: string) => {
-      void call(`/api/page/${pageKey}/edit/${editId}`, { method: "DELETE" });
+    (pageId: string, editId: string) => {
+      void call(`/api/session/${sessionId}/page/${pageId}/edit/${editId}`, {
+        method: "DELETE",
+      });
     },
-    [call]
+    [call, sessionId]
   );
 
   const updateComment = React.useCallback(
-    (pageKey: string, commentId: string, feedback: string) => {
-      void call(`/api/page/${pageKey}/comment/${commentId}`, {
+    (pageId: string, commentId: string, feedback: string) => {
+      void call(`/api/session/${sessionId}/page/${pageId}/comment/${commentId}`, {
         method: "PATCH",
         body: JSON.stringify({ feedback }),
       });
     },
-    [call]
+    [call, sessionId]
   );
 
   const updateEdit = React.useCallback(
-    (pageKey: string, editId: string, suggestedText: string) => {
-      void call(`/api/page/${pageKey}/edit/${editId}`, {
+    (pageId: string, editId: string, suggestedText: string) => {
+      void call(`/api/session/${sessionId}/page/${pageId}/edit/${editId}`, {
         method: "PATCH",
         body: JSON.stringify({ suggestedText }),
       });
     },
-    [call]
+    [call, sessionId]
   );
 
   const handleUpdateComment = React.useCallback(
@@ -321,8 +336,9 @@ function ReviewSessionComponent() {
   );
 
   const handleJump = React.useCallback(
-    (pageKey: string, line?: number, side?: "old" | "new", annotId?: string) => {
-      setActiveKey(pageKey);
+    (pageId: string, line?: number, side?: "old" | "new", annotId?: string) => {
+      if (!session?.pages[pageId]) return;
+      setActiveKey(pageId);
       if (!line && !annotId) return;
 
       // Jumping to another page fetches its content first, so nothing to scroll to
@@ -349,42 +365,28 @@ function ReviewSessionComponent() {
       };
       setTimeout(find, 16);
     },
-    []
+    [session]
   );
 
   const handleSendFeedback = React.useCallback(
     async (note?: string) => {
-      await call("/api/send", {
+      await call(`/api/session/${sessionId}/send`, {
         method: "POST",
-        body: JSON.stringify({ sessionId, overallNote: note }),
+        body: JSON.stringify({ overallNote: note }),
       });
     },
     [call, sessionId]
   );
 
   const handleNavigateLink = React.useCallback(
-    async (href: string) => {
-      const targetKey = session?.pageKeys.find(
-        (k) => session.pages[k]?.filename === href || session.pages[k]?.file.endsWith(href)
-      );
-      if (targetKey) {
-        selectPage(targetKey);
-        return;
-      }
-
-      const res = await fetch(`/api/session/${sessionId}/page`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file: href }),
+    (href: string) => {
+      const target = session?.reviewMap.items.find((item) => {
+        const page = session.pages[item.pageId];
+        return page?.filename === href || page?.file.endsWith(href);
       });
-      if (!res.ok) return;
-      const body = await res.json();
-      if (body.page?.key) {
-        selectPage(body.page.key);
-        await loadSession();
-      }
+      if (target) selectPage(target.pageId);
     },
-    [session, sessionId, loadSession, selectPage]
+    [session, selectPage]
   );
 
   // Annotations in reading order, so j and k walk the page the way the eye does.
@@ -419,7 +421,7 @@ function ReviewSessionComponent() {
 
   const stepFile = React.useCallback(
     (delta: 1 | -1) => {
-      const keys = session?.pageKeys ?? [];
+      const keys = session?.reviewMap.items.map((item) => item.pageId) ?? [];
       if (keys.length < 2) return;
       const at = Math.max(0, keys.indexOf(activeKey));
       cursorRef.current = -1;
@@ -430,19 +432,19 @@ function ReviewSessionComponent() {
 
   // The one item the agent is blocked on, wherever it is in the session.
   const openQuestion = React.useMemo(() => {
-    for (const key of session?.pageKeys ?? []) {
+    for (const { pageId: key } of session?.reviewMap.items ?? []) {
       const page = session?.pages[key];
       const item = [...(page?.comments ?? []), ...(page?.edits ?? [])].find(
         (entry) => entry.status === "question" && !entry.orphaned
       );
-      if (item) return { key, line: item.startLine, id: item.id };
+      if (item) return { pageId: key, line: item.startLine, id: item.id };
     }
     return null;
   }, [session]);
 
   const answerQuestion = React.useCallback(() => {
     if (!openQuestion) return false;
-    handleJump(openQuestion.key, openQuestion.line, undefined, openQuestion.id);
+    handleJump(openQuestion.pageId, openQuestion.line, undefined, openQuestion.id);
     if (openQuestion.line) {
       setTimeout(() => viewerRef.current?.openAt(openQuestion.line!, undefined, "comment"), 400);
     }
@@ -548,9 +550,10 @@ function ReviewSessionComponent() {
         }`}
       >
         <DocumentSidebar
+          key={sessionId}
           pages={session.pages}
-          pageKeys={session.pageKeys}
-          activeKey={activeKey}
+          reviewMap={session.reviewMap}
+          activePageId={activeKey}
           onSelectPage={selectPage}
         />
       </ResizablePanel>
@@ -571,9 +574,12 @@ function ReviewSessionComponent() {
           >
             <PanelLeft />
           </Button>
-          <span className="min-w-0 flex-1 truncate text-sm font-medium">
-            {activePage?.filename}
-          </span>
+          <div className="min-w-0 flex-1 leading-tight">
+            <div className="truncate text-sm font-medium">{activePage?.filename}</div>
+            <div className="text-muted-foreground truncate text-[11px]" title={activeMapPath}>
+              {activeMapPath}
+            </div>
+          </div>
 
           {activePage?.stale && (
             <Button variant="outline" size="sm" onClick={handleRefreshPage}>

@@ -5,7 +5,6 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { ReviewServer } from "../../src/server/server";
 import { resolveDiff } from "../../src/cli/git";
-import { gitTarget, targetKey } from "../../src/cli/paths";
 
 const FILE_COUNT = 40;
 
@@ -19,7 +18,7 @@ describe("Diff Session Integration", () => {
   let server: ReviewServer;
   let port: number;
   let repo: string;
-  let target: string;
+  let pendingSessionId: string;
 
   const post = (route: string, body: unknown) =>
     fetch(`http://127.0.0.1:${port}${route}`, {
@@ -50,7 +49,6 @@ describe("Diff Session Integration", () => {
     git(["add", "-A"], repo);
     git(["commit", "-qm", "change"], repo);
 
-    target = gitTarget(repo, "HEAD~1..HEAD");
     server = new ReviewServer();
     port = await server.start(5898);
   });
@@ -64,8 +62,7 @@ describe("Diff Session Integration", () => {
     const resolved = resolveDiff("HEAD~1..HEAD", { cwd: repo });
     return (await (await post("/api/session", { diff: resolved })).json()) as {
       sessionId: string;
-      entryKey: string;
-      pageKeys: string[];
+      reviewMap: { items: Array<{ pageId: string }> };
     };
   };
 
@@ -83,7 +80,7 @@ describe("Diff Session Integration", () => {
       await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}`)
     ).json();
 
-    expect(session.pageKeys).toHaveLength(FILE_COUNT);
+    expect(session.reviewMap.items).toHaveLength(FILE_COUNT);
     for (const page of Object.values(session.pages) as any[]) {
       expect(page.content).toBeUndefined();
       expect(page.diff).toBeUndefined();
@@ -93,32 +90,40 @@ describe("Diff Session Integration", () => {
 
   it("serves both blob sides from the per-page route", async () => {
     const created = await openDiff();
-    const key = created.pageKeys.find((k) => {
-      const p = server.store.pages.get(k);
-      return p?.filename === "src/file-0.ts";
-    })!;
+    const reviewSession = server.store.sessions.get(created.sessionId)!;
+    const key = created.reviewMap.items
+      .map((item) => item.pageId)
+      .find((k) => {
+        const p = reviewSession.pages[k];
+        return p?.filename === "src/file-0.ts";
+      })!;
 
-    const page = await (await fetch(`http://127.0.0.1:${port}/api/page/${key}`)).json();
+    const page = await (
+      await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}/page/${key}`)
+    ).json();
     expect(page.kind).toBe("diff");
     expect(page.diff.oldContent).toContain("const value = 0;");
     expect(page.diff.newContent).toContain("const value = 1;");
   });
 
-  it("polls a diff session by its git target rather than a path", async () => {
+  it("polls a diff session by its session ID", async () => {
     const created = await openDiff();
-    expect(created.entryKey).toBe(targetKey(target));
+    pendingSessionId = created.sessionId;
 
-    await post(`/api/page/${created.pageKeys[0]}/comment`, {
-      kind: "line_range",
-      startLine: 3,
-      endLine: 3,
-      feedback: "narrow this",
-      side: "new",
-    });
-    await post("/api/send", { sessionId: created.sessionId });
+    await post(
+      `/api/session/${created.sessionId}/page/${created.reviewMap.items[0].pageId}/comment`,
+      {
+        kind: "line_range",
+        startLine: 3,
+        endLine: 3,
+        feedback: "narrow this",
+        side: "new",
+      }
+    );
+    await post(`/api/session/${created.sessionId}/send`, {});
 
     const batch = await (
-      await fetch(`http://127.0.0.1:${port}/api/poll?target=${encodeURIComponent(target)}`)
+      await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}/poll`)
     ).json();
 
     expect(batch.status).toBe("feedback");
@@ -128,7 +133,11 @@ describe("Diff Session Integration", () => {
   it("keeps both the pending batch and the diff pages across a restart", () => {
     const restarted = new ReviewServer();
 
-    expect(restarted.store.getBatch(targetKey(target))).toBeDefined();
-    expect([...restarted.store.pages.values()].some((p) => p.kind === "diff")).toBe(true);
+    expect(restarted.store.getBatch(pendingSessionId)).toBeDefined();
+    expect(
+      Object.values(restarted.store.sessions.get(pendingSessionId)!.pages).some(
+        (page) => page.kind === "diff"
+      )
+    ).toBe(true);
   });
 });

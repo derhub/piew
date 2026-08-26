@@ -48,11 +48,29 @@ bunx @derhub/piew diff --staged
 bunx @derhub/piew diff
 ```
 
+Each open prints a session ID and the current Review Map. The agent can replace the
+whole ordered map with existing page IDs or absolute file paths:
+
+```sh
+echo '{
+  "title": "Release review",
+  "items": [
+    {"path": "Web/Auth/login.ts", "source": {"kind": "page", "pageId": "p_123"}},
+    {"path": "API/Auth/route.ts", "source": {"kind": "file", "file": "/abs/api/route.ts"}}
+  ]
+}' | bunx @derhub/piew map s_123
+```
+
+Map paths are ordered exactly as supplied and may contain up to five slash-separated
+segments. Updating a map is all-or-nothing.
+
 Wait for a submitted feedback batch:
 
 ```sh
 bunx @derhub/piew path/to/spec.md --wait --timeout 600
-bunx @derhub/piew poll path/to/spec.md --timeout 600
+bunx @derhub/piew poll s_123 --timeout 600
+bunx @derhub/piew status s_123
+echo '{"note":"done","items":[{"id":"c_1","status":"applied"}]}' | bunx @derhub/piew respond s_123
 ```
 
 The full agent workflow and feedback contract live in

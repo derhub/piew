@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll, afterEach } from "bun:test";
+import { describe, expect, it, beforeAll, afterAll, afterEach, beforeEach } from "bun:test";
 import path from "node:path";
 import fs from "node:fs";
 import { ReviewServer } from "../../src/server/server";
@@ -7,6 +7,7 @@ describe("Poll Delivery", () => {
   let server: ReviewServer;
   let port: number;
   let file: string;
+  let sessionId: string;
 
   beforeAll(async () => {
     file = path.resolve(__dirname, "doc-poll.md");
@@ -21,31 +22,38 @@ describe("Poll Delivery", () => {
     if (fs.existsSync(file)) fs.unlinkSync(file);
   });
 
-  async function sendComment(feedback: string) {
+  beforeEach(async () => {
     const sessionRes = await fetch(`http://127.0.0.1:${port}/api/session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ files: [file] }),
     });
     const session = await sessionRes.json();
+    sessionId = session.sessionId;
+  });
 
-    await fetch(`http://127.0.0.1:${port}/api/page/${session.pageKeys[0]}/comment`, {
+  async function sendComment(feedback: string) {
+    const session = await fetch(`http://127.0.0.1:${port}/api/session/${sessionId}`).then((res) =>
+      res.json()
+    );
+    await fetch(
+      `http://127.0.0.1:${port}/api/session/${sessionId}/page/${session.reviewMap.items[0].pageId}/comment`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startLine: 1, feedback }),
+      }
+    );
+
+    await fetch(`http://127.0.0.1:${port}/api/session/${sessionId}/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ startLine: 1, feedback }),
-    });
-
-    await fetch(`http://127.0.0.1:${port}/api/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: session.sessionId }),
+      body: JSON.stringify({}),
     });
   }
 
   const poll = (query: string) =>
-    fetch(`http://127.0.0.1:${port}/api/poll?target=${encodeURIComponent(file)}&${query}`).then(
-      (r) => r.json()
-    );
+    fetch(`http://127.0.0.1:${port}/api/session/${sessionId}/poll?${query}`).then((r) => r.json());
 
   // Comments accumulate on the page until a batch is acked, so each test clears its own.
   afterEach(async () => {
