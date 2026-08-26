@@ -1,5 +1,4 @@
 import React from "react";
-import mermaid from "mermaid";
 import { Maximize2, Minus, Plus } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { useIsDark } from "~/hooks/use-theme";
@@ -31,22 +30,26 @@ function useRenderedChart(chart: string, id: string, isDark: boolean) {
   React.useEffect(() => {
     let active = true;
 
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: isDark ? "dark" : "neutral",
-      securityLevel: "loose",
-      fontFamily: "ui-sans-serif, system-ui, sans-serif",
-      themeVariables: {
-        // Mermaid's dark theme paints edge labels on a light plate, and its color
-        // parser rejects the oklch() our tokens are written in — so pass hex.
-        edgeLabelBackground: isDark ? "#1f1f1f" : "#ffffff",
-      },
-    });
-
-    mermaid
-      .render(id, chart.trim())
-      .then(({ svg: rendered }) => {
+    import("mermaid")
+      .then(({ default: mermaid }) => {
         if (!active) return;
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: isDark ? "dark" : "neutral",
+          securityLevel: "loose",
+          fontFamily: "ui-sans-serif, system-ui, sans-serif",
+          themeVariables: {
+            // Mermaid's dark theme paints edge labels on a light plate, and its color
+            // parser rejects the oklch() our tokens are written in — so pass hex.
+            edgeLabelBackground: isDark ? "#1f1f1f" : "#ffffff",
+          },
+        });
+
+        return mermaid.render(id, chart.trim());
+      })
+      .then((result) => {
+        if (!active || !result) return;
+        const { svg: rendered } = result;
         setSvg(rendered);
         setError(null);
       })
