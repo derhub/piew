@@ -146,6 +146,11 @@ interface StoredState {
   sessions: Record<string, ReviewSession>;
 }
 
+export interface PruneResult {
+  sessionIds: string[];
+  unreferencedFiles: string[];
+}
+
 function isTerminal(item: ReviewComment | ReviewEdit): boolean {
   return item.status === "applied" || item.status === "skipped";
 }
@@ -463,6 +468,36 @@ export class Store {
       page.edits = [];
     }
     this.saveToDisk();
+  }
+
+  public pruneExpiredSessions(now = Date.now()): PruneResult {
+    const sessionIds: string[] = [];
+    const expiredSessions = new Map<string, ReviewSession>();
+    const expiredFiles = new Set<string>();
+    const cutoff = now - SESSION_TTL_MS;
+
+    for (const [sessionId, session] of this.sessions) {
+      if (session.lastSeen >= cutoff) continue;
+      sessionIds.push(sessionId);
+      expiredSessions.set(sessionId, session);
+      for (const page of Object.values(session.pages)) expiredFiles.add(page.file);
+      this.sessions.delete(sessionId);
+    }
+
+    if (sessionIds.length === 0) return { sessionIds, unreferencedFiles: [] };
+
+    const referencedFiles = new Set<string>();
+    for (const session of this.sessions.values()) {
+      for (const page of Object.values(session.pages)) referencedFiles.add(page.file);
+    }
+    const unreferencedFiles = [...expiredFiles].filter((file) => !referencedFiles.has(file));
+    try {
+      this.saveToDisk();
+    } catch (error) {
+      for (const [sessionId, session] of expiredSessions) this.sessions.set(sessionId, session);
+      throw error;
+    }
+    return { sessionIds, unreferencedFiles };
   }
 
   public saveToDisk(): void {
