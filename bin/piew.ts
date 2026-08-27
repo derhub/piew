@@ -16,6 +16,7 @@ Usage:
   piew diff [range]                   Open a git diff for review
       --staged                        Diff the index against HEAD
       --wait                          Open, then block until feedback arrives
+  piew map <session-id> --show        Print the current Review Map
   piew map <session-id>               Replace the Review Map; JSON on stdin
   piew poll <session-id>              Wait for human feedback and output JSON (for agents)
       --ack                           Acknowledge last batch and keep waiting
@@ -23,8 +24,11 @@ Usage:
   piew respond <session-id>           Answer the batch you were given; JSON on stdin
   piew status <session-id>            Check whether feedback is waiting without blocking
 
-Open and diff print the session ID used by every follow-up command:
+Open and diff print compact JSON with the session ID used by every follow-up command:
   piew poll s_123
+
+Show the current Review Map:
+  piew map s_123 --show
 
 Replace the whole Review Map with ordered slash paths and existing pages or files:
   echo '{"title":"Release review","items":[{"path":"Web/Auth/login.ts","source":{"kind":"page","pageId":"p_123"}},{"path":"API/Auth/route.ts","source":{"kind":"file","file":"/abs/api/route.ts"}}]}' | piew map s_123
@@ -94,10 +98,10 @@ if (command === "poll") {
 } else if (command === "map") {
   const sessionId = argv.slice(1).find((arg) => !arg.startsWith("-"));
   if (!sessionId) {
-    console.error("Usage: piew map <session-id> < review-map.json");
+    console.error("Usage: piew map <session-id> [--show] < review-map.json");
     process.exit(1);
   }
-  await mapCommand(sessionId, await Bun.stdin.text());
+  await mapCommand(sessionId, argv.includes("--show") ? undefined : await Bun.stdin.text());
 } else if (command === "respond") {
   const sessionId = argv.slice(1).find((a) => !a.startsWith("-"));
   if (!sessionId) {

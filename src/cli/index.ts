@@ -1,9 +1,17 @@
 import fs from "node:fs";
-import path from "node:path";
 import { canonicalTarget, stateDataPath } from "./paths";
 import { ensureDaemonRunning, openBrowser, readServerRecord, isServerAlive } from "./daemon";
 import { resolveDiff } from "./git";
 import type { ReviewMap } from "../lib/types";
+
+function writeJson(value: unknown) {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+function projectAgentOutput(value: Record<string, unknown>) {
+  const { sent_at, next_step, overall_note, ...output } = value;
+  return overall_note ? { ...output, overall_note } : output;
+}
 
 export async function openCommand(files: string[]): Promise<string> {
   if (files.length === 0) {
@@ -34,15 +42,11 @@ export async function openCommand(files: string[]): Promise<string> {
     process.exit(1);
   }
 
-  const body = (await res.json()) as { sessionId: string; path: string; reviewMap: ReviewMap };
+  const body = (await res.json()) as { sessionId: string; path: string };
   const url = `http://127.0.0.1:${daemon.port}${body.path}`;
   openBrowser(url);
 
-  console.log(`Reviewing ${validFiles.map((f) => path.basename(f)).join(", ")}`);
-  console.log(url);
-  console.log(`Session: ${body.sessionId}`);
-  console.log(`Review Map: ${JSON.stringify(body.reviewMap)}`);
-  console.log(`\nWaiting for feedback? Run:\n  piew poll ${body.sessionId}`);
+  writeJson({ sessionId: body.sessionId, url });
 
   return body.sessionId;
 }
@@ -78,20 +82,33 @@ export async function diffCommand(
     process.exit(1);
   }
 
-  const body = (await res.json()) as { sessionId: string; path: string; reviewMap: ReviewMap };
+  const body = (await res.json()) as { sessionId: string; path: string };
   const url = `http://127.0.0.1:${daemon.port}${body.path}`;
   openBrowser(url);
 
-  console.log(`Reviewing ${resolved.files.length} file(s) in ${resolved.range}`);
-  console.log(url);
-  console.log(`Session: ${body.sessionId}`);
-  console.log(`Review Map: ${JSON.stringify(body.reviewMap)}`);
-  console.log(`\nWaiting for feedback? Run:\n  piew poll ${body.sessionId}`);
+  writeJson({ sessionId: body.sessionId, url });
 
   return body.sessionId;
 }
 
-export async function mapCommand(sessionId: string, raw: string): Promise<void> {
+export async function mapCommand(sessionId: string, raw?: string): Promise<void> {
+  const daemon = await ensureDaemonRunning();
+
+  if (raw === undefined) {
+    const response = await fetch(`http://127.0.0.1:${daemon.port}/api/session/${sessionId}`);
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      reviewMap?: ReviewMap;
+    };
+    if (!response.ok || !body.reviewMap) {
+      console.error(`Review Map lookup failed: ${body.error || response.statusText}`);
+      process.exit(1);
+      return;
+    }
+    writeJson(body.reviewMap);
+    return;
+  }
+
   let payload: unknown;
   try {
     payload = JSON.parse(raw);
@@ -100,7 +117,6 @@ export async function mapCommand(sessionId: string, raw: string): Promise<void> 
     process.exit(1);
     return;
   }
-  const daemon = await ensureDaemonRunning();
   const response = await fetch(`http://127.0.0.1:${daemon.port}/api/session/${sessionId}/map`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -135,9 +151,7 @@ export async function pollCommand(
   while (true) {
     const remainingSecs = deadline ? Math.ceil((deadline - Date.now()) / 1000) : 0;
     if (deadline && remainingSecs <= 0) {
-      process.stdout.write(
-        `${JSON.stringify({ status: "timeout", waited_seconds: options.timeoutSecs }, null, 2)}\n`
-      );
+      writeJson({ status: "timeout", waited_seconds: options.timeoutSecs });
       return;
     }
 
@@ -146,7 +160,7 @@ export async function pollCommand(
       ...(remainingSecs ? { timeout: String(remainingSecs) } : {}),
     });
 
-    let batch: any;
+    let batch: Record<string, unknown>;
     try {
       const res = await fetch(
         `http://127.0.0.1:${daemon.port}/api/session/${sessionId}/poll?${query.toString()}`
@@ -155,14 +169,14 @@ export async function pollCommand(
         process.stderr.write(`Poll error: ${res.statusText}\n`);
         process.exit(1);
       }
-      batch = await res.json();
+      batch = (await res.json()) as Record<string, unknown>;
     } catch (err: any) {
       process.stderr.write(`Connection failed: ${err.message}\n`);
       process.exit(1);
     }
 
     if (batch?.status !== "timeout") {
-      process.stdout.write(`${JSON.stringify(batch, null, 2)}\n`);
+      writeJson(projectAgentOutput(batch));
       return;
     }
 
@@ -201,7 +215,7 @@ export async function respondCommand(sessionId: string, raw: string) {
   if (body.unknown?.length) {
     console.error(`Not delivered to you, so ignored: ${body.unknown.join(", ")}`);
   }
-  process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+  writeJson(body);
 }
 
 export async function statusCommand(sessionId: string) {
@@ -211,7 +225,7 @@ export async function statusCommand(sessionId: string) {
     const res = await fetch(`http://127.0.0.1:${saved.port}/api/session/${sessionId}/status`);
     if (res.ok) {
       const data = await res.json();
-      process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+      writeJson(data);
       return;
     }
   }
@@ -239,5 +253,5 @@ export async function statusCommand(sessionId: string) {
       edits: pages.reduce((sum, page) => sum + page.edits.filter((item) => !item.sent).length, 0),
     },
   };
-  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  writeJson(payload);
 }
