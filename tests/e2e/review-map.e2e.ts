@@ -13,6 +13,17 @@ test("Review Map keeps a complex live review oriented", async ({ page, request }
   fs.writeFileSync(second, "export const second = true;\n");
   fs.writeFileSync(third, "export const third = true;\n");
 
+  let connectEvents!: () => void;
+  const eventsBlocked = new Promise<void>((resolve) => {
+    connectEvents = resolve;
+  });
+  let eventsRequested = false;
+  await page.route("**/events?*", async (route) => {
+    eventsRequested = true;
+    await eventsBlocked;
+    await route.continue();
+  });
+
   const created = await request.post("/api/session", { data: { files: [first] } });
   const session = await created.json();
   const firstPageId = session.activePageId;
@@ -27,6 +38,7 @@ test("Review Map keeps a complex live review oriented", async ({ page, request }
   });
 
   await page.goto(`/review/${session.sessionId}`);
+  await expect.poll(() => eventsRequested).toBe(true);
   await expect(page.getByRole("heading", { name: "Review fixture" })).toBeVisible();
   await expect(page.getByText("Release review", { exact: true })).toBeVisible();
   await expect(page.getByRole("treeitem", { name: "Web", exact: true })).toHaveAttribute(
@@ -45,11 +57,6 @@ test("Review Map keeps a complex live review oriented", async ({ page, request }
   const apiTop = (await page.getByRole("treeitem", { name: "API", exact: true }).boundingBox())!.y;
   expect(webTop).toBeLessThan(apiTop);
 
-  await request.post(`/api/session/${session.sessionId}/page/${firstPageId}/comment`, {
-    data: { startLine: 3, feedback: "Keep this focused" },
-  });
-  await expect(page.getByTitle("1 annotation(s)")).toBeVisible();
-
   await page.getByLabel("Search files").click();
   const search = page.getByRole("textbox", { name: "Search…" });
   const activeLeaf = page.getByRole("treeitem", { name: "fixture.md", exact: true });
@@ -61,6 +68,7 @@ test("Review Map keeps a complex live review oriented", async ({ page, request }
     element.scrollTop = 700;
   });
   const beforeScroll = await content.evaluate((element) => element.scrollTop);
+  fs.writeFileSync(first, `# Updated review fixture\n\n${"Long review content.\n\n".repeat(80)}`);
   await request.put(`/api/session/${session.sessionId}/map`, {
     data: {
       title: "Release review",
@@ -71,8 +79,20 @@ test("Review Map keeps a complex live review oriented", async ({ page, request }
       ],
     },
   });
+  await expect
+    .poll(async () => {
+      const response = await request.get(`/api/session/${session.sessionId}/page/${firstPageId}`);
+      return ((await response.json()) as { content: string }).content;
+    })
+    .toContain("# Updated review fixture");
+  connectEvents();
 
   await expect(page.getByLabel("3 documents")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Updated review fixture" })).toBeVisible();
+  await request.post(`/api/session/${session.sessionId}/page/${firstPageId}/comment`, {
+    data: { startLine: 3, feedback: "Keep this focused" },
+  });
+  await expect(page.getByTitle("1 annotation(s)")).toBeVisible();
   await expect(search).toHaveValue("fixture");
   await expect(search).toBeFocused();
   await expect(activeLeaf).toHaveAttribute("aria-selected", "true");
@@ -81,4 +101,8 @@ test("Review Map keeps a complex live review oriented", async ({ page, request }
   await expect(page.getByRole("treeitem", { name: "second.ts", exact: true })).toBeHidden();
   await expect(page.getByTitle("Web/Auth/Login/fixture.md")).toBeVisible();
   await expect.poll(() => content.evaluate((element) => element.scrollTop)).toBe(beforeScroll);
+
+  await search.fill("third");
+  await page.getByRole("treeitem", { name: "third.ts", exact: true }).click();
+  await expect(page.getByText("export const third = true;")).toBeVisible();
 });

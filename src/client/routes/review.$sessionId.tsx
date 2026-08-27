@@ -147,19 +147,23 @@ function ReviewSessionComponent() {
   const viewerRef = React.useRef<ViewerHandle>(null);
   // Where j and k are in the annotation list; -1 so the first j lands on the first.
   const cursorRef = React.useRef(-1);
+  const sessionRequestRef = React.useRef(0);
   const { zoom, zoomIn, zoomOut, reset: resetZoom } = useDocZoom();
 
   const loadSession = React.useCallback(async () => {
+    const request = ++sessionRequestRef.current;
     try {
       const res = await fetch(`/api/session/${sessionId}`);
       if (!res.ok) throw new Error(`Failed to load session: ${res.statusText}`);
       const data: SessionState = await res.json();
+      if (request !== sessionRequestRef.current) return;
       setSession(data);
       setActiveKey((prev) =>
         prev && data.pages[prev] ? prev : data.activePageId || data.reviewMap.items[0]?.pageId || ""
       );
       setLoading(false);
     } catch (err: any) {
+      if (request !== sessionRequestRef.current) return;
       setError(err.message || "Failed to load session");
       setLoading(false);
     }
@@ -191,6 +195,10 @@ function ReviewSessionComponent() {
 
     const eventSource = new EventSource(`/events?session=${sessionId}`);
     const refresh = () => void loadSession();
+    eventSource.addEventListener("open", () => {
+      setContentRevision((revision) => revision + 1);
+      refresh();
+    });
     eventSource.addEventListener("refresh", refresh);
     eventSource.addEventListener("stale", refresh);
     eventSource.addEventListener("reload", (event) => {
