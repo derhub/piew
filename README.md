@@ -48,8 +48,14 @@ bunx @derhub/piew diff --staged
 bunx @derhub/piew diff
 ```
 
-Each open prints a session ID and the current Review Map. The agent can replace the
-whole ordered map with existing page IDs or absolute file paths:
+Each open prints compact JSON with the session ID and browser URL. Show the current
+Review Map only when the agent needs page IDs for custom organization:
+
+```sh
+bunx @derhub/piew map s_123 --show
+```
+
+Replace the whole ordered map with existing page IDs or absolute file paths:
 
 ```sh
 echo '{
@@ -74,7 +80,9 @@ echo '{"note":"done","items":[{"id":"c_1","status":"applied"}]}' | bunx @derhub/
 ```
 
 The full agent workflow and feedback contract live in
-[`skills/piew/SKILL.md`](skills/piew/SKILL.md).
+[`skills/piew/SKILL.md`](skills/piew/SKILL.md). Review Map, status, recovery, and
+payload details live in
+[`skills/piew/references/advanced.md`](skills/piew/references/advanced.md).
 
 ## Develop
 
