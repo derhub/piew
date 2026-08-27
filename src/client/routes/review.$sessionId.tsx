@@ -11,12 +11,15 @@ import type { PanelImperativeHandle } from "react-resizable-panels";
 import { PanelLeft } from "lucide-react";
 import { useDocZoom } from "~/hooks/use-doc-zoom";
 import { ActionBar } from "~/components/ActionBar";
-import { CodeDiffViewer } from "~/components/CodeDiffViewer";
 import { ShortcutSheet } from "~/components/ShortcutSheet";
 import { FindBar } from "~/components/FindBar";
 import { useHotkeys } from "~/hooks/use-hotkeys";
 import type { ViewerHandle } from "~/components/Annotation";
 import type { DiffFile, FeedbackTurn, PageMeta, ReviewMap } from "~/lib/types";
+
+const CodeDiffViewer = React.lazy(() =>
+  import("~/components/CodeDiffViewer").then((module) => ({ default: module.CodeDiffViewer }))
+);
 
 export const Route = createRoute({
   getParentRoute: () => rootRoute,
@@ -162,23 +165,26 @@ function ReviewSessionComponent() {
     }
   }, [sessionId]);
 
-  const [contents, setContents] = React.useState<Record<string, PageContent>>({});
+  const [activeContentState, setActiveContentState] = React.useState<{
+    pageId: string;
+    body: PageContent;
+  } | null>(null);
+  const [contentRevision, setContentRevision] = React.useState(0);
 
   // Content is fetched per page on open, so the session payload stays flat no
   // matter how many files the range touches.
-  const loadContent = React.useCallback(
-    async (key: string) => {
-      const res = await fetch(`/api/session/${sessionId}/page/${key}`);
-      if (!res.ok) return;
-      const body: PageContent = await res.json();
-      setContents((prev) => ({ ...prev, [key]: body }));
-    },
-    [sessionId]
-  );
-
   React.useEffect(() => {
-    if (activeKey) void loadContent(activeKey);
-  }, [activeKey, loadContent]);
+    if (!activeKey) return;
+    const controller = new AbortController();
+    void fetch(`/api/session/${sessionId}/page/${activeKey}`, { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const body: PageContent = await res.json();
+        if (!controller.signal.aborted) setActiveContentState({ pageId: activeKey, body });
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [activeKey, contentRevision, sessionId]);
 
   React.useEffect(() => {
     loadSession();
@@ -190,7 +196,7 @@ function ReviewSessionComponent() {
     eventSource.addEventListener("reload", (event) => {
       try {
         const { pageId } = JSON.parse((event as MessageEvent).data);
-        if (pageId) void loadContent(pageId);
+        if (pageId) setContentRevision((revision) => revision + 1);
       } catch {
         /* malformed frame */
       }
@@ -206,10 +212,11 @@ function ReviewSessionComponent() {
     });
 
     return () => eventSource.close();
-  }, [sessionId, loadSession, loadContent]);
+  }, [sessionId, loadSession]);
 
   const activePage = session?.pages[activeKey];
-  const activeContent = contents[activeKey];
+  const activeContent =
+    activeContentState?.pageId === activeKey ? activeContentState.body : undefined;
   const activeMapPath = session?.reviewMap.items.find((item) => item.pageId === activeKey)?.path;
   const explorerRef = React.useRef<PanelImperativeHandle | null>(null);
   const [explorerCollapsed, setExplorerCollapsed] = React.useState(false);
@@ -233,8 +240,8 @@ function ReviewSessionComponent() {
     const res = await fetch(`/api/session/${sessionId}/page/${activeKey}/refresh`, {
       method: "POST",
     });
-    if (res.ok) await loadContent(activeKey);
-  }, [activeKey, loadContent, sessionId]);
+    if (res.ok) setContentRevision((revision) => revision + 1);
+  }, [activeKey, sessionId]);
 
   // Opening another document should start at its top, not inherit the last scroll offset.
   const selectPage = React.useCallback((key: string) => {
@@ -604,23 +611,25 @@ function ReviewSessionComponent() {
               and any line can be brought to the middle of the viewport. */}
           <main className="min-w-0 flex-1 pb-[60vh]">
             {activePage && activePage.kind !== "markdown" ? (
-              <CodeDiffViewer
-                page={activePage}
-                diff={activeContent?.diff}
-                content={activeContent?.content}
-                comments={activePage.comments}
-                edits={activePage.edits}
-                onAddComment={handleAddComment}
-                onAddEdit={handleAddEdit}
-                onDeleteComment={handleDeleteComment}
-                onDeleteEdit={handleDeleteEdit}
-                onUpdateComment={handleUpdateComment}
-                onUpdateEdit={handleUpdateEdit}
-                onNavigateLink={handleNavigateLink}
-                zoom={zoom}
-                toolbarSlot={toolbarSlot}
-                viewerRef={viewerRef}
-              />
+              <React.Suspense fallback={null}>
+                <CodeDiffViewer
+                  page={activePage}
+                  diff={activeContent?.diff}
+                  content={activeContent?.content}
+                  comments={activePage.comments}
+                  edits={activePage.edits}
+                  onAddComment={handleAddComment}
+                  onAddEdit={handleAddEdit}
+                  onDeleteComment={handleDeleteComment}
+                  onDeleteEdit={handleDeleteEdit}
+                  onUpdateComment={handleUpdateComment}
+                  onUpdateEdit={handleUpdateEdit}
+                  onNavigateLink={handleNavigateLink}
+                  zoom={zoom}
+                  toolbarSlot={toolbarSlot}
+                  viewerRef={viewerRef}
+                />
+              </React.Suspense>
             ) : activePage ? (
               <MarkdownViewer
                 content={activeContent?.content ?? ""}

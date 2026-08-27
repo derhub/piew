@@ -6,7 +6,10 @@ export interface WatcherCallback {
 }
 
 export class FileWatcher {
-  private watched = new Map<string, { watcher: fs.FSWatcher; timer: any }>();
+  private watched = new Map<
+    string,
+    { watcher: fs.FSWatcher; timer: ReturnType<typeof setTimeout> | null }
+  >();
   private hashes = new Map<string, string>();
   private onReload: WatcherCallback;
 
@@ -20,6 +23,10 @@ export class FileWatcher {
 
   public setLastHash(file: string, hash: string) {
     this.hashes.set(file, hash);
+  }
+
+  public count() {
+    return this.watched.size;
   }
 
   public watch(file: string) {

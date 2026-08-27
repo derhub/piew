@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { ReviewMapError, Store } from "./store";
+import { ReviewMapError, Store, type PruneResult } from "./store";
 import { FileWatcher } from "./watcher";
 import { readDiffBlobs, type ResolvedDiff } from "../cli/git";
 import { canonicalTarget, ensureStateDir, SERVER_PROTOCOL, serverRecordPath } from "../cli/paths";
@@ -16,6 +16,7 @@ import type {
 } from "../lib/types";
 
 const STATUSES = new Set<ItemStatus>(["applied", "skipped", "question"]);
+const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 const withoutSent = <T extends { sent?: boolean }>({ sent, ...rest }: T) => rest;
 
@@ -32,8 +33,12 @@ export class ReviewServer {
   private sseClients = new Map<string, Set<ReadableStreamDefaultController>>();
   private pollers = new Map<
     string,
-    Set<{ resolve: (batch: ReviewBatch | null) => void; timer: any }>
+    Set<{
+      resolve: (batch: ReviewBatch | null) => void;
+      timer: ReturnType<typeof setTimeout> | null;
+    }>
   >();
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private serverInstance: any = null;
   private staticDir: string;
 
@@ -68,7 +73,54 @@ export class ReviewServer {
           clients.delete(c);
         }
       }
+      if (clients.size === 0) this.sseClients.delete(sessionId);
     }
+  }
+
+  private releaseSessionResources(sessionId: string) {
+    const clients = this.sseClients.get(sessionId);
+    if (clients) {
+      for (const client of clients) {
+        try {
+          client.close();
+        } catch {}
+      }
+      this.sseClients.delete(sessionId);
+    }
+
+    const pollSet = this.pollers.get(sessionId);
+    if (pollSet) {
+      for (const poller of pollSet) {
+        if (poller.timer) clearTimeout(poller.timer);
+        poller.resolve(null);
+      }
+      this.pollers.delete(sessionId);
+    }
+  }
+
+  public cleanupExpiredSessions(now = Date.now()): PruneResult {
+    const result = this.store.pruneExpiredSessions(now);
+    for (const sessionId of result.sessionIds) this.releaseSessionResources(sessionId);
+    for (const file of result.unreferencedFiles) this.watcher.unwatch(file);
+    return result;
+  }
+
+  public resourceCounts() {
+    let sse = 0;
+    let pollers = 0;
+    let timers = this.cleanupTimer ? 1 : 0;
+    for (const clients of this.sseClients.values()) sse += clients.size;
+    for (const pollSet of this.pollers.values()) {
+      pollers += pollSet.size;
+      for (const poller of pollSet) timers += poller.timer ? 1 : 0;
+    }
+    return {
+      sessions: this.store.sessions.size,
+      watchers: this.watcher.count(),
+      sse,
+      pollers,
+      timers,
+    };
   }
 
   public agentState(sessionId: string): "listening" | "working" | "stranded" | "idle" {
@@ -221,6 +273,7 @@ export class ReviewServer {
       pollSet.delete(poller);
       poller.resolve(batch);
     }
+    this.pollers.delete(sessionId);
     return true;
   }
 
@@ -298,6 +351,7 @@ export class ReviewServer {
               const clients = this.sseClients.get(sid);
               if (clients) {
                 clients.delete(controllerRef);
+                if (clients.size === 0) this.sseClients.delete(sid);
               }
             },
           });
@@ -883,7 +937,7 @@ export class ReviewServer {
               this.pollers.set(sessionId, new Set());
             }
 
-            let timer: any = null;
+            let timer: ReturnType<typeof setTimeout> | null = null;
             const pollerRecord = {
               resolve: (batch: ReviewBatch | null) => {
                 if (batch) {
@@ -901,13 +955,16 @@ export class ReviewServer {
                   );
                 }
               },
-              timer: null as any,
+              timer: null,
             };
 
             if (waitSecs > 0) {
               timer = setTimeout(() => {
                 const pollSet = this.pollers.get(sessionId);
-                if (pollSet) pollSet.delete(pollerRecord);
+                if (pollSet) {
+                  pollSet.delete(pollerRecord);
+                  if (pollSet.size === 0) this.pollers.delete(sessionId);
+                }
                 pollerRecord.resolve(null);
                 this.broadcastAgentState(sessionId);
               }, waitSecs * 1000);
@@ -988,13 +1045,27 @@ export class ReviewServer {
       "utf8"
     );
 
+    this.cleanupTimer = setInterval(() => {
+      try {
+        this.cleanupExpiredSessions();
+      } catch {}
+    }, SESSION_CLEANUP_INTERVAL_MS);
+
     return this.port;
   }
 
   public stop() {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    for (const sessionId of new Set([...this.sseClients.keys(), ...this.pollers.keys()])) {
+      this.releaseSessionResources(sessionId);
+    }
     this.watcher.closeAll();
     if (this.serverInstance) {
       this.serverInstance.stop();
+      this.serverInstance = null;
     }
   }
 }

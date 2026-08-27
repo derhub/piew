@@ -1,5 +1,4 @@
 import React from "react";
-import { bundledLanguages, codeToHtml } from "shiki";
 import { Copy, Check, Plus } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
@@ -24,17 +23,22 @@ export function CodeBlock({
   React.useEffect(() => {
     let active = true;
     const lang = language.toLowerCase();
-    const safeLang = lang in bundledLanguages ? lang : "text";
 
-    codeToHtml(cleanCode, {
-      lang: safeLang,
-      // Markdown keeps its own highlighter: the diff theme picker offers themes
-      // that @pierre/diffs registers itself and shiki cannot resolve.
-      themes: { light: "github-light", dark: "github-dark" },
-      defaultColor: false,
-    })
+    import("shiki")
+      .then(({ bundledLanguages, codeToHtml }) => {
+        if (!active) return;
+        const safeLang = lang in bundledLanguages ? lang : "text";
+
+        return codeToHtml(cleanCode, {
+          lang: safeLang,
+          // Markdown keeps its own highlighter: the diff theme picker offers themes
+          // that @pierre/diffs registers itself and shiki cannot resolve.
+          themes: { light: "github-light", dark: "github-dark" },
+          defaultColor: false,
+        });
+      })
       .then((res) => {
-        if (active) setHtml(res);
+        if (active && res !== undefined) setHtml(res);
       })
       .catch(() => {
         if (active) setHtml("");
