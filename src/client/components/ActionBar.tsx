@@ -26,6 +26,7 @@ interface ActionBarProps {
   onZoomIn: () => void;
   onZoomOut: () => void;
   onResetZoom: () => void;
+  showDocumentTools?: boolean;
   feedbackHidden: boolean;
   onToggleFeedback: () => void;
   onSend: () => Promise<void>;
@@ -38,6 +39,7 @@ export function ActionBar({
   onZoomIn,
   onZoomOut,
   onResetZoom,
+  showDocumentTools = true,
   feedbackHidden,
   onToggleFeedback,
   onSend,
@@ -62,13 +64,13 @@ export function ActionBar({
 
         <Separator
           orientation="vertical"
-          className="mx-1 h-4 max-md:hidden data-vertical:self-center"
+          className={`mx-1 h-4 max-md:hidden data-vertical:self-center ${showDocumentTools ? "" : "hidden"}`}
         />
 
         <Button
           variant="ghost"
           size="icon-sm"
-          className="rounded-full max-md:hidden"
+          className={`rounded-full max-md:hidden ${showDocumentTools ? "" : "hidden"}`}
           aria-label="Zoom out"
           onClick={onZoomOut}
         >
@@ -77,7 +79,7 @@ export function ActionBar({
         <Button
           variant="ghost"
           size="sm"
-          className="rounded-full px-1 font-mono text-xs tabular-nums max-md:hidden"
+          className={`rounded-full px-1 font-mono text-xs tabular-nums max-md:hidden ${showDocumentTools ? "" : "hidden"}`}
           aria-label="Reset zoom"
           title="Reset text size"
           onClick={onResetZoom}
@@ -87,7 +89,7 @@ export function ActionBar({
         <Button
           variant="ghost"
           size="icon-sm"
-          className="rounded-full max-md:hidden"
+          className={`rounded-full max-md:hidden ${showDocumentTools ? "" : "hidden"}`}
           aria-label="Zoom in"
           onClick={onZoomIn}
         >
@@ -96,7 +98,7 @@ export function ActionBar({
 
         <Separator
           orientation="vertical"
-          className="mx-1 h-4 max-md:hidden data-vertical:self-center"
+          className={`mx-1 h-4 max-md:hidden data-vertical:self-center ${showDocumentTools ? "" : "hidden"}`}
         />
 
         <Select value={codeTheme} onValueChange={(v) => setCodeTheme(v as CodeThemeName)}>
@@ -104,7 +106,7 @@ export function ActionBar({
             size="sm"
             aria-label="Syntax theme"
             title="Syntax theme"
-            className="h-8 gap-1 rounded-full border-0 px-2 shadow-none focus-visible:ring-0 max-md:hidden"
+            className={`h-8 gap-1 rounded-full border-0 px-2 shadow-none focus-visible:ring-0 max-md:hidden ${showDocumentTools ? "" : "hidden"}`}
           >
             <Palette className="size-4" />
             <SelectValue />
