@@ -4,6 +4,7 @@ import { Route as rootRoute } from "./__root";
 import { DocumentSidebar } from "~/components/DocumentSidebar";
 import { TableOfContents } from "~/components/TableOfContents";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
+import { ImageViewer, isImageUrl } from "~/components/ImageViewer";
 import { FeedbackChat } from "~/components/FeedbackChat";
 import { Button } from "~/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "~/components/ui/resizable";
@@ -275,6 +276,7 @@ function ReviewSessionComponent() {
   }, [sessionId, loadSession]);
 
   const activePage = session?.pages[activeKey];
+  const activePageIsImage = Boolean(activePage && isImageUrl(activePage.filename));
   const activePageContentState: PageContentState | null = activePage
     ? activeContentState?.pageId === activeKey && activeContentState.revision === contentRevision
       ? activeContentState
@@ -684,8 +686,8 @@ function ReviewSessionComponent() {
         <div className="flex flex-1 items-start">
           {/* Scroll past the end: the last lines clear the floating action bar,
               and any line can be brought to the middle of the viewport. */}
-          <main className="min-w-0 flex-1 pb-[60vh]">
-            {activePage && activePageContentState?.status === "error" ? (
+          <main className={`min-w-0 flex-1 ${activePageIsImage ? "" : "pb-[60vh]"}`}>
+            {activePage && !activePageIsImage && activePageContentState?.status === "error" ? (
               <div role="alert" className="flex flex-col items-start gap-3 p-8 text-sm">
                 <p className="text-destructive font-medium">
                   Could not load {activePage.filename}: {activePageContentState.message}
@@ -698,10 +700,22 @@ function ReviewSessionComponent() {
                   Retry
                 </Button>
               </div>
-            ) : activePage && activePageContentState?.status !== "ready" ? (
+            ) : activePage && !activePageIsImage && activePageContentState?.status !== "ready" ? (
               <div className="text-muted-foreground p-8 text-sm">
                 Loading {activePage.filename}...
               </div>
+            ) : activePage && activePageIsImage ? (
+              <ImageViewer
+                items={[
+                  {
+                    src: `/api/session/${sessionId}/page/${activePage.id}/media?path=${encodeURIComponent(activePage.filename)}`,
+                    alt: activePage.filename,
+                  },
+                ]}
+                index={0}
+                mode="page"
+                onIndexChange={() => undefined}
+              />
             ) : activePage && activePage.kind !== "markdown" ? (
               <React.Suspense fallback={null}>
                 <CodeDiffViewer
@@ -758,6 +772,7 @@ function ReviewSessionComponent() {
           onZoomIn={zoomIn}
           onZoomOut={zoomOut}
           onResetZoom={resetZoom}
+          showDocumentTools={!activePageIsImage}
           feedbackHidden={isNarrow() ? overlay !== "feedback" : feedbackCollapsed}
           onToggleFeedback={toggleFeedback}
           onSend={() => handleSendFeedback()}

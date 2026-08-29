@@ -9,6 +9,7 @@ import { remarkAlert } from "remark-github-blockquote-alert";
 import { remarkSourceLine } from "~/lib/remark-source-line";
 import { nodeText, slugify } from "~/lib/slug";
 import { CodeBlock } from "./CodeBlock";
+import { ImageViewer, isImageUrl, type ImageViewerItem } from "./ImageViewer";
 import { MermaidBlock } from "./MermaidBlock";
 import {
   AnnotatedBlock,
@@ -98,6 +99,37 @@ function AnnotatedCodeBlock({
   );
 }
 
+interface ImageActions {
+  openElement: (element: HTMLImageElement) => void;
+  openLink: (href: string, label: string) => boolean;
+}
+
+const ImageContext = React.createContext<ImageActions | undefined>(undefined);
+
+function ImageNode({ node: _node, ...props }: any) {
+  const images = React.useContext(ImageContext);
+  const open = (element: HTMLImageElement) => images?.openElement(element);
+  return (
+    <img
+      {...props}
+      data-image-viewer
+      role="button"
+      tabIndex={0}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        open(event.currentTarget);
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        open(event.currentTarget);
+      }}
+    />
+  );
+}
+
 /** Stable across renders so react-markdown never re-parses on annotation state changes. */
 const components = {
   // Fenced blocks render their own container; the typeset `pre` shell would double-box it.
@@ -130,6 +162,7 @@ const components = {
   h2: (p: any) => <Heading level={2} {...p} />,
   h3: (p: any) => <Heading level={3} {...p} />,
   h4: (p: any) => <Heading level={4} {...p} />,
+  img: ImageNode,
   p({ node, children, ...props }: any) {
     return (
       <AnnotatedBlock line={node?.position?.start?.line} threadAside>
@@ -186,10 +219,15 @@ const NavigateContext = React.createContext<((href: string) => void) | undefined
 
 function LinkNode({ href, isExternal, children, ...props }: any) {
   const navigate = React.useContext(NavigateContext);
+  const images = React.useContext(ImageContext);
   return (
     <a
       href={href}
       onClick={(e) => {
+        if (!isExternal && href && images?.openLink(href, nodeText(children))) {
+          e.preventDefault();
+          return;
+        }
         if (!isExternal && navigate && href) {
           e.preventDefault();
           navigate(href);
@@ -224,10 +262,15 @@ export function MarkdownViewer({
   zoom = 1,
   viewerRef,
 }: MarkdownViewerProps) {
+  const articleRef = React.useRef<HTMLElement>(null);
   const [open, setOpen] = React.useState<{
     line: number;
     quote?: string;
     mode?: ComposerMode;
+  } | null>(null);
+  const [imageViewer, setImageViewer] = React.useState<{
+    items: ImageViewerItem[];
+    index: number;
   } | null>(null);
 
   React.useImperativeHandle(
@@ -276,6 +319,14 @@ export function MarkdownViewer({
     ]
   );
 
+  const resolveMediaUrl = React.useCallback(
+    (url: string) =>
+      mediaBaseUrl && !absoluteUrl.test(url)
+        ? `${mediaBaseUrl}?path=${encodeURIComponent(url)}`
+        : url,
+    [mediaBaseUrl]
+  );
+
   const urlTransform = React.useMemo<UrlTransform>(
     () => (url, key, node) => {
       const safeUrl = defaultUrlTransform(url);
@@ -288,9 +339,37 @@ export function MarkdownViewer({
       ) {
         return safeUrl;
       }
-      return `${mediaBaseUrl}?path=${encodeURIComponent(safeUrl)}`;
+      return resolveMediaUrl(safeUrl);
     },
-    [mediaBaseUrl]
+    [mediaBaseUrl, resolveMediaUrl]
+  );
+
+  const imageActions = React.useMemo<ImageActions>(
+    () => ({
+      openElement: (element) => {
+        const elements = [
+          ...(articleRef.current?.querySelectorAll<HTMLImageElement>("img[data-image-viewer]") ??
+            []),
+        ];
+        const items = elements.map((image) => ({
+          src: image.currentSrc || image.src,
+          alt: image.alt || "Image",
+        }));
+        const index = elements.indexOf(element);
+        if (index >= 0) setImageViewer({ items, index });
+      },
+      openLink: (href, label) => {
+        if (!/^(?:\.\/)?artifacts\//.test(href) || !isImageUrl(href)) return false;
+        const safeUrl = defaultUrlTransform(href);
+        if (!safeUrl) return false;
+        setImageViewer({
+          items: [{ src: resolveMediaUrl(safeUrl), alt: label || "Image" }],
+          index: 0,
+        });
+        return true;
+      },
+    }),
+    [resolveMediaUrl]
   );
 
   // Parsing + highlighting is expensive; keep it keyed to document rendering inputs alone.
@@ -329,19 +408,34 @@ export function MarkdownViewer({
   };
 
   return (
-    <NavigateContext.Provider value={onNavigateLink}>
-      <AnnotationContext.Provider value={api}>
-        <div
-          className="doc-column mx-auto w-full max-w-[52rem] pt-10 pb-28"
-          onMouseUp={handleSelection}
-          // `zoom` scales rem-based children too, which a font-size change would not.
-          // Widths resolve in the zoomed coordinate space already, so the column grows
-          // with zoom; only the gutter is divided back out so it stays put.
-          style={{ zoom, paddingInline: `calc(var(--doc-pad) / ${zoom})` }}
-        >
-          <article className="typeset typeset-docs w-full max-w-none">{document_}</article>
-        </div>
-      </AnnotationContext.Provider>
-    </NavigateContext.Provider>
+    <ImageContext.Provider value={imageActions}>
+      <NavigateContext.Provider value={onNavigateLink}>
+        <AnnotationContext.Provider value={api}>
+          <div
+            className="doc-column mx-auto w-full max-w-[52rem] pt-10 pb-28"
+            onMouseUp={handleSelection}
+            // `zoom` scales rem-based children too, which a font-size change would not.
+            // Widths resolve in the zoomed coordinate space already, so the column grows
+            // with zoom; only the gutter is divided back out so it stays put.
+            style={{ zoom, paddingInline: `calc(var(--doc-pad) / ${zoom})` }}
+          >
+            <article ref={articleRef} className="typeset typeset-docs w-full max-w-none">
+              {document_}
+            </article>
+          </div>
+          {imageViewer && (
+            <ImageViewer
+              items={imageViewer.items}
+              index={imageViewer.index}
+              mode="dialog"
+              onIndexChange={(index) =>
+                setImageViewer((current) => current && { ...current, index })
+              }
+              onClose={() => setImageViewer(null)}
+            />
+          )}
+        </AnnotationContext.Provider>
+      </NavigateContext.Provider>
+    </ImageContext.Provider>
   );
 }

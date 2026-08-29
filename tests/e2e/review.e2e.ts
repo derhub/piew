@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test, expect } from "@playwright/test";
 import {
@@ -269,6 +270,104 @@ test.describe("markdown rendering", () => {
     const response = await fallbackResponse;
     expect(response.status()).toBe(200);
     expect(response.headers()["content-type"]).toContain("video/mp4");
+  });
+
+  test("inspects markdown images without leaving the review", async ({ page, request }) => {
+    const session = await openSession(
+      request,
+      `# Review fixture
+
+<img src="artifacts/first.svg" alt="First image" />
+<img src="artifacts/second.svg" alt="Second image" />
+
+<a href="artifacts/first.svg">Open linked image</a>`
+    );
+    const artifactsDir = path.join(path.dirname(session.file), "artifacts");
+    fs.mkdirSync(artifactsDir);
+    const svg = (color: string) =>
+      `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"><rect width="800" height="600" fill="${color}" /></svg>`;
+    fs.writeFileSync(path.join(artifactsDir, "first.svg"), svg("tomato"), "utf8");
+    fs.writeFileSync(path.join(artifactsDir, "second.svg"), svg("royalblue"), "utf8");
+    await openReview(page, session);
+    await page.evaluate(() => {
+      HTMLElement.prototype.requestFullscreen = async function () {
+        this.dataset.fullscreenRequested = "true";
+      };
+    });
+
+    const review = doc(page);
+    const first = review.getByAltText("First image");
+    const originalUrl = page.url();
+    await first.click();
+
+    let viewer = page.locator('dialog[open][aria-label="Image viewer"]');
+    await expect(viewer).toBeVisible();
+    await expect(viewer.getByText("1 / 2")).toBeVisible();
+    await viewer.getByRole("button", { name: "Zoom in" }).click();
+    await expect(viewer.getByText("125%")).toBeVisible();
+
+    const viewedImage = viewer.getByAltText("First image");
+    const imageBox = await viewedImage.boundingBox();
+    await page.mouse.move(imageBox!.x + imageBox!.width / 2, imageBox!.y + imageBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(
+      imageBox!.x + imageBox!.width / 2 + 30,
+      imageBox!.y + imageBox!.height / 2 + 20
+    );
+    await page.mouse.up();
+    await expect(viewedImage).not.toHaveAttribute("style", /translate\(0px, 0px\)/);
+
+    await viewer.getByRole("button", { name: "Reset image" }).click();
+    await expect(viewer.getByText("100%")).toBeVisible();
+    await expect(viewedImage).toHaveAttribute("style", /translate\(0px, 0px\) scale\(1\)/);
+
+    await viewer.getByRole("button", { name: "View fullscreen" }).click();
+    await expect(viewer.locator(".image-viewer")).toHaveAttribute(
+      "data-fullscreen-requested",
+      "true"
+    );
+
+    await page.keyboard.press("ArrowRight");
+    await expect(viewer.getByAltText("Second image")).toBeVisible();
+    await expect(viewer.getByText("2 / 2")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    await expect(first).toBeFocused();
+
+    await first.press("Enter");
+    viewer = page.locator('dialog[open][aria-label="Image viewer"]');
+    await expect(viewer).toBeVisible();
+    await viewer.getByRole("button", { name: "Close image viewer" }).click();
+
+    await review.getByRole("link", { name: "Open linked image" }).click();
+    viewer = page.locator('dialog[open][aria-label="Image viewer"]');
+    await expect(viewer.getByAltText("Open linked image")).toBeVisible();
+    expect(page.url()).toBe(originalUrl);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    const viewerBox = await viewer.boundingBox();
+    expect(Math.round(viewerBox!.width)).toBe(390);
+  });
+
+  test("renders a standalone image in the image viewer", async ({ page, request }) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "piew-e2e-image-"));
+    const file = path.join(dir, "fixture.svg");
+    fs.writeFileSync(
+      file,
+      '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="gold" /></svg>',
+      "utf8"
+    );
+    const response = await request.post("/api/session", { data: { files: [file] } });
+    const session = await response.json();
+
+    await page.goto(`/review/${session.sessionId}`);
+
+    const viewer = doc(page).getByLabel("Image viewer");
+    await expect(viewer.getByAltText("fixture.svg")).toBeVisible();
+    await expect(viewer.getByRole("button", { name: "Zoom in" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Zoom in" })).toHaveCount(1);
+    await expect(page.getByLabel("Syntax theme")).toBeHidden();
+    await expect(doc(page).locator("diffs-container")).toHaveCount(0);
   });
 });
 
