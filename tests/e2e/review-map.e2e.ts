@@ -75,7 +75,7 @@ test("Review Map keeps a complex live review oriented", async ({ page, request }
       items: [
         { path: "Web/Auth/Login/fixture.md", source: { kind: "page", pageId: firstPageId } },
         { path: "API/Billing/Handlers/second.ts", source: { kind: "file", file: second } },
-        { path: "Worker/Queue/Jobs/third.ts", source: { kind: "file", file: third } },
+        { path: "Web/Profile/third.ts", source: { kind: "file", file: third } },
       ],
     },
   });
@@ -88,6 +88,7 @@ test("Review Map keeps a complex live review oriented", async ({ page, request }
   connectEvents();
 
   await expect(page.getByLabel("3 documents")).toBeVisible();
+  await expect(page.getByRole("treeitem", { name: "Web", exact: true })).toHaveCount(1);
   await expect(page.getByRole("heading", { name: "Updated review fixture" })).toBeVisible();
   await request.post(`/api/session/${session.sessionId}/page/${firstPageId}/comment`, {
     data: { startLine: 3, feedback: "Keep this focused" },

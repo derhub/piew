@@ -1,11 +1,7 @@
 import React from "react";
 import { Search, X } from "lucide-react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import {
-  preparePresortedFileTreeInput,
-  themeToTreeStyles,
-  type GitStatusEntry,
-} from "@pierre/trees";
+import { prepareFileTreeInput, themeToTreeStyles, type GitStatusEntry } from "@pierre/trees";
 import { resolveTheme } from "@pierre/diffs";
 import { Button } from "~/components/ui/button";
 import { useCodeTheme } from "~/hooks/use-code-theme";
@@ -36,6 +32,31 @@ function directoryPaths(paths: string[]): string[] {
   return [...directories];
 }
 
+function prepareSidebarTreeInput(paths: string[]) {
+  const orderByPrefix = new Map<string, number>();
+  let order = 0;
+  for (const treePath of paths) {
+    const segments = treePath.split("/");
+    for (let depth = 1; depth <= segments.length; depth++) {
+      const prefix = segments.slice(0, depth).join("/");
+      if (!orderByPrefix.has(prefix)) orderByPrefix.set(prefix, order++);
+    }
+  }
+
+  return prepareFileTreeInput(paths, {
+    sort: (left, right) => {
+      const depth = Math.min(left.segments.length, right.segments.length);
+      for (let index = 0; index < depth; index++) {
+        if (left.segments[index] === right.segments[index]) continue;
+        const leftPrefix = left.segments.slice(0, index + 1).join("/");
+        const rightPrefix = right.segments.slice(0, index + 1).join("/");
+        return orderByPrefix.get(leftPrefix)! - orderByPrefix.get(rightPrefix)!;
+      }
+      return left.segments.length - right.segments.length;
+    },
+  });
+}
+
 export function DocumentSidebar({
   pages,
   reviewMap,
@@ -45,7 +66,7 @@ export function DocumentSidebar({
   const items = reviewMap.items;
   const pathsKey = items.map((item) => item.path).join("\n");
   const paths = React.useMemo(() => (pathsKey ? pathsKey.split("\n") : []), [pathsKey]);
-  const preparedInput = React.useMemo(() => preparePresortedFileTreeInput(paths), [paths]);
+  const preparedInput = React.useMemo(() => prepareSidebarTreeInput(paths), [paths]);
 
   const keyByPath = React.useMemo(() => {
     const map = new Map<string, string>();
