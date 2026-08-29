@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.4.0](https://github.com/derhub/piew/compare/v0.3.0...v0.4.0) (2026-08-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sessions:** make review sessions durable
+
+### Features
+
+* **cli:** reduce agent token usage ([b43109a](https://github.com/derhub/piew/commit/b43109a623fe214a8cc3943fcf91381135ed7989))
+* **cli:** reduce agent token usage ([d9135e0](https://github.com/derhub/piew/commit/d9135e07d596b5cd3e114541a97518dc1b0f9f74))
+* **review:** render plan-owned media ([830b25c](https://github.com/derhub/piew/commit/830b25c01eaefbfcb101b35e9e79e649079cbf3b))
+* **review:** render plan-owned media ([50d1079](https://github.com/derhub/piew/commit/50d1079cc2719590be5dd0575fbc54bb1214a3f0))
+* **sessions:** make review sessions durable ([a1d3f46](https://github.com/derhub/piew/commit/a1d3f46d39794c34659a90f76cf1f710d4ad078a))
+
+
+### Bug Fixes
+
+* **client:** reconcile viewer after live connection gaps ([fe0e303](https://github.com/derhub/piew/commit/fe0e30356a834ca1d1cd405f942367175468f83c))
+* **client:** reconcile viewer after live connection gaps ([4a64680](https://github.com/derhub/piew/commit/4a646806bff167e4c8a3b552db57d31274a2c80a))
+* **sidebar:** deduplicate shared directory roots ([a4b3b21](https://github.com/derhub/piew/commit/a4b3b2144a330f8d835b44a3ec06b9e691113c47))
+* **sidebar:** deduplicate shared directory roots ([8e3d3b8](https://github.com/derhub/piew/commit/8e3d3b8e1145b80b9beb91b72b6d57bd92abd5b8))
+
+
+### Performance
+
+* optimize review views and resource lifetimes ([e9ea4d5](https://github.com/derhub/piew/commit/e9ea4d55cfd13653b964b5927b34d720de35933f))
+
 ## [0.3.0](https://github.com/derhub/piew/compare/v0.2.0...v0.3.0) (2026-08-26)
 
 
