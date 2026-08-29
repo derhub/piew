@@ -571,6 +571,46 @@ export class ReviewServer {
           }
         }
 
+        const mediaMatch = route.match(
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/page\/([a-zA-Z0-9_]+)\/media$/
+        );
+        if (mediaMatch && req.method === "GET") {
+          const [, sid, pageId] = mediaMatch;
+          const page = this.store.getPage(sid, pageId);
+          const requested = url.searchParams.get("path");
+          if (!page || !requested) return new Response(null, { status: 404, headers: corsHeaders });
+
+          try {
+            const root = fs.realpathSync(path.dirname(page.file));
+            const filePath = fs.realpathSync(path.resolve(root, requested));
+            const relative = path.relative(root, filePath);
+            if (
+              relative === ".." ||
+              relative.startsWith(`..${path.sep}`) ||
+              path.isAbsolute(relative) ||
+              !fs.statSync(filePath).isFile()
+            ) {
+              return new Response(null, { status: 404, headers: corsHeaders });
+            }
+
+            const file = Bun.file(filePath);
+            const type = file.type.split(";", 1)[0];
+            if (
+              !type.startsWith("image/") &&
+              !type.startsWith("video/") &&
+              !type.startsWith("audio/") &&
+              type !== "text/vtt"
+            ) {
+              return new Response(null, { status: 404, headers: corsHeaders });
+            }
+            return new Response(file, {
+              headers: { ...corsHeaders, "Cache-Control": "no-store" },
+            });
+          } catch {
+            return new Response(null, { status: 404, headers: corsHeaders });
+          }
+        }
+
         const pageMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/page\/([a-zA-Z0-9_]+)$/);
         if (pageMatch && req.method === "GET") {
           const [, sid, pageId] = pageMatch;

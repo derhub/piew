@@ -43,6 +43,7 @@ export interface CodeDiffViewerProps {
   onUpdateComment: (id: string, feedback: string) => void;
   onUpdateEdit: (id: string, suggestedText: string) => void;
   onNavigateLink?: (href: string) => void;
+  mediaBaseUrl?: string;
   zoom?: number;
   /** Header node the view toggles render into, so they sit in the top nav. */
   toolbarSlot?: HTMLElement | null;
@@ -98,6 +99,7 @@ export function CodeDiffViewer({
   onUpdateComment,
   onUpdateEdit,
   onNavigateLink,
+  mediaBaseUrl,
   zoom,
   toolbarSlot,
   viewerRef,
@@ -459,6 +461,7 @@ export function CodeDiffViewer({
           onUpdateComment={onUpdateComment}
           onUpdateEdit={onUpdateEdit}
           onNavigateLink={onNavigateLink}
+          mediaBaseUrl={mediaBaseUrl}
           zoom={zoom}
           viewerRef={previewRef}
         />

@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import { ReviewServer } from "../../src/server/server";
@@ -183,5 +184,99 @@ describe("ReviewServer HTTP API", () => {
         },
       },
     });
+  });
+
+  it("serves confined media with native byte ranges", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "piew-media-"));
+    const reviewDir = path.join(root, "review");
+    const artifactsDir = path.join(reviewDir, "artifacts");
+    fs.mkdirSync(artifactsDir, { recursive: true });
+
+    const reviewFile = path.join(reviewDir, "plan.md");
+    fs.writeFileSync(reviewFile, "# Media review\n", "utf8");
+    fs.writeFileSync(
+      path.join(artifactsDir, "diagram.svg"),
+      '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"></svg>',
+      "utf8"
+    );
+    fs.writeFileSync(path.join(artifactsDir, "demo.mp4"), "0123456789", "utf8");
+    fs.writeFileSync(path.join(artifactsDir, "narration.mp3"), "0123456789", "utf8");
+    fs.writeFileSync(
+      path.join(artifactsDir, "captions.vtt"),
+      "WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n",
+      "utf8"
+    );
+    fs.writeFileSync(path.join(artifactsDir, "notes.txt"), "private", "utf8");
+    const outside = path.join(root, "outside.svg");
+    fs.writeFileSync(outside, "<svg></svg>", "utf8");
+    fs.symlinkSync(outside, path.join(artifactsDir, "escaped.svg"));
+
+    try {
+      const created = await fetch(`http://127.0.0.1:${port}/api/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: [reviewFile] }),
+      }).then((response) => response.json());
+      const mediaUrl = (relativePath: string) => {
+        const url = new URL(
+          `http://127.0.0.1:${port}/api/session/${created.sessionId}/page/${created.activePageId}/media`
+        );
+        url.searchParams.set("path", relativePath);
+        return url;
+      };
+
+      const allowed = await Promise.all(
+        [
+          ["artifacts/diagram.svg", "image/svg+xml"],
+          ["artifacts/demo.mp4", "video/mp4"],
+          ["artifacts/narration.mp3", "audio/mpeg"],
+          ["artifacts/captions.vtt", "text/vtt"],
+        ].map(async ([relativePath, contentType]) => {
+          const response = await fetch(mediaUrl(relativePath));
+          return [
+            response.status,
+            response.headers.get("content-type")?.split(";")[0],
+            contentType,
+          ];
+        })
+      );
+      const rejected = await Promise.all(
+        [
+          "artifacts/missing.svg",
+          "../outside.svg",
+          "artifacts/escaped.svg",
+          "artifacts/notes.txt",
+        ].map((relativePath) => fetch(mediaUrl(relativePath)).then((response) => response.status))
+      );
+      const ranges = await Promise.all(
+        ["artifacts/demo.mp4", "artifacts/narration.mp3"].map(async (relativePath) => {
+          const response = await fetch(mediaUrl(relativePath), {
+            headers: { Range: "bytes=2-5" },
+          });
+          return {
+            status: response.status,
+            range: response.headers.get("content-range"),
+            accepts: response.headers.get("accept-ranges"),
+            body: await response.text(),
+          };
+        })
+      );
+
+      expect({ allowed, rejected, ranges }).toEqual({
+        allowed: [
+          [200, "image/svg+xml", "image/svg+xml"],
+          [200, "video/mp4", "video/mp4"],
+          [200, "audio/mpeg", "audio/mpeg"],
+          [200, "text/vtt", "text/vtt"],
+        ],
+        rejected: [404, 404, 404, 404],
+        ranges: [
+          { status: 206, range: "bytes 2-5/10", accepts: "bytes", body: "2345" },
+          { status: 206, range: "bytes 2-5/10", accepts: "bytes", body: "2345" },
+        ],
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

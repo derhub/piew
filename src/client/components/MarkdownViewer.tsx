@@ -1,5 +1,5 @@
 import React from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkFrontmatter from "remark-frontmatter";
 import remarkMath from "remark-math";
@@ -43,6 +43,7 @@ interface MarkdownViewerProps {
   onUpdateComment: (id: string, feedback: string) => void;
   onUpdateEdit: (id: string, suggestedText: string) => void;
   onNavigateLink?: (href: string) => void;
+  mediaBaseUrl?: string;
   zoom?: number;
   viewerRef?: React.Ref<ViewerHandle>;
 }
@@ -205,6 +206,8 @@ function LinkNode({ href, isExternal, children, ...props }: any) {
 
 const remarkPlugins = [remarkGfm, remarkFrontmatter, remarkMath, remarkAlert, remarkSourceLine];
 const rehypePlugins = [rehypeRaw, rehypeKatex];
+const mediaTags = new Set(["audio", "img", "source", "track", "video"]);
+const absoluteUrl = /^(?:[a-z][a-z\d+.-]*:|[/?#])/i;
 
 export function MarkdownViewer({
   content,
@@ -217,6 +220,7 @@ export function MarkdownViewer({
   onUpdateComment,
   onUpdateEdit,
   onNavigateLink,
+  mediaBaseUrl,
   zoom = 1,
   viewerRef,
 }: MarkdownViewerProps) {
@@ -272,18 +276,36 @@ export function MarkdownViewer({
     ]
   );
 
-  // Parsing + highlighting is expensive; keep it keyed to the document text alone.
+  const urlTransform = React.useMemo<UrlTransform>(
+    () => (url, key, node) => {
+      const safeUrl = defaultUrlTransform(url);
+      if (
+        !mediaBaseUrl ||
+        !safeUrl ||
+        !mediaTags.has(node.tagName) ||
+        (key !== "src" && key !== "poster") ||
+        absoluteUrl.test(safeUrl)
+      ) {
+        return safeUrl;
+      }
+      return `${mediaBaseUrl}?path=${encodeURIComponent(safeUrl)}`;
+    },
+    [mediaBaseUrl]
+  );
+
+  // Parsing + highlighting is expensive; keep it keyed to document rendering inputs alone.
   const document_ = React.useMemo(
     () => (
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
         components={components}
+        urlTransform={urlTransform}
       >
         {content}
       </ReactMarkdown>
     ),
-    [content]
+    [content, urlTransform]
   );
 
   const handleSelection = () => {
