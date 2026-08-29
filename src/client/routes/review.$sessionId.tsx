@@ -456,9 +456,19 @@ function ReviewSessionComponent() {
         const page = session.pages[item.pageId];
         return page?.filename === href || page?.file.endsWith(href);
       });
-      if (target) selectPage(target.pageId);
+      if (target) {
+        selectPage(target.pageId);
+        return;
+      }
+
+      const page = session?.pages[activeKey];
+      if (page && /^(?:\.\/)?artifacts\//.test(href)) {
+        window.location.assign(
+          `/api/session/${sessionId}/page/${page.id}/media?path=${encodeURIComponent(href)}`
+        );
+      }
     },
-    [session, selectPage]
+    [session, activeKey, selectPage, sessionId]
   );
 
   // Annotations in reading order, so j and k walk the page the way the eye does.
@@ -707,6 +717,7 @@ function ReviewSessionComponent() {
                   onUpdateComment={handleUpdateComment}
                   onUpdateEdit={handleUpdateEdit}
                   onNavigateLink={handleNavigateLink}
+                  mediaBaseUrl={`/api/session/${sessionId}/page/${activePage.id}/media`}
                   zoom={zoom}
                   toolbarSlot={toolbarSlot}
                   viewerRef={viewerRef}
@@ -724,6 +735,7 @@ function ReviewSessionComponent() {
                 onUpdateComment={handleUpdateComment}
                 onUpdateEdit={handleUpdateEdit}
                 onNavigateLink={handleNavigateLink}
+                mediaBaseUrl={`/api/session/${sessionId}/page/${activePage.id}/media`}
                 zoom={zoom}
                 viewerRef={viewerRef}
               />

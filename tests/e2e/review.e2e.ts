@@ -160,6 +160,116 @@ test.describe("markdown rendering", () => {
     await expect(details.getByText("Hidden Markdown.")).toBeVisible();
     await expect(details.locator("strong")).toHaveText("Markdown");
   });
+
+  test("renders confined native media at desktop and phone widths", async ({ page, request }) => {
+    await page.route("https://example.com/**", (route) => route.abort());
+    const session = await openSession(
+      request,
+      `# Review fixture
+
+<figure>
+<img src="artifacts/diagram.svg" alt="Local diagram" />
+<figcaption>Image caption</figcaption>
+</figure>
+
+<figure>
+<video controls preload="metadata" poster="artifacts/poster.svg">
+<source src="artifacts/demo.mp4" type="video/mp4" />
+<track src="artifacts/captions.vtt" kind="captions" srclang="en" label="English" />
+<a href="artifacts/demo.mp4">Download video</a>
+</video>
+<figcaption>Video caption</figcaption>
+</figure>
+
+<figure>
+<audio controls preload="metadata" src="artifacts/narration.mp3">
+<a href="artifacts/narration.mp3">Download audio</a>
+</audio>
+<figcaption>Audio caption</figcaption>
+</figure>
+
+<img src="https://example.com/hosted.svg" alt="Hosted diagram" />
+<video data-testid="unsafe-media" controls src="javascript:alert('unsafe')"></video>`
+    );
+    const artifactsDir = path.join(path.dirname(session.file), "artifacts");
+    fs.mkdirSync(artifactsDir);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"></svg>';
+    fs.writeFileSync(path.join(artifactsDir, "diagram.svg"), svg, "utf8");
+    fs.writeFileSync(path.join(artifactsDir, "poster.svg"), svg, "utf8");
+    fs.writeFileSync(path.join(artifactsDir, "demo.mp4"), "video", "utf8");
+    fs.writeFileSync(path.join(artifactsDir, "narration.mp3"), "audio", "utf8");
+    fs.writeFileSync(
+      path.join(artifactsDir, "captions.vtt"),
+      "WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n",
+      "utf8"
+    );
+    await openReview(page, session);
+
+    const review = doc(page);
+    const image = review.getByAltText("Local diagram");
+    const video = review.locator("video").first();
+    const source = video.locator("source");
+    const track = video.locator("track");
+    const audio = review.locator("audio");
+    const mediaPath = `/api/session/${session.sessionId}/page/${session.pageId}/media`;
+    for (const [element, attribute, relativePath] of [
+      [image, "src", "artifacts/diagram.svg"],
+      [video, "poster", "artifacts/poster.svg"],
+      [source, "src", "artifacts/demo.mp4"],
+      [track, "src", "artifacts/captions.vtt"],
+      [audio, "src", "artifacts/narration.mp3"],
+    ] as const) {
+      const url = new URL((await element.getAttribute(attribute))!, page.url());
+      expect(url.pathname).toBe(mediaPath);
+      expect(url.searchParams.get("path")).toBe(relativePath);
+    }
+
+    await expect(review.getByAltText("Hosted diagram")).toHaveAttribute(
+      "src",
+      "https://example.com/hosted.svg"
+    );
+    expect((await review.getByTestId("unsafe-media").getAttribute("src")) ?? "").not.toContain(
+      "javascript:"
+    );
+    await expect(video).toHaveAttribute("controls", "");
+    await expect(audio).toHaveAttribute("controls", "");
+    await expect(track).toHaveAttribute("kind", "captions");
+    await expect(review.locator("figcaption")).toHaveText([
+      "Image caption",
+      "Video caption",
+      "Audio caption",
+    ]);
+    await expect(video.locator("a")).toHaveAttribute("href", "artifacts/demo.mp4");
+    await expect(audio.locator("a")).toHaveAttribute("href", "artifacts/narration.mp3");
+
+    for (const viewport of [
+      { width: 1280, height: 720 },
+      { width: 390, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await expect(image).toBeVisible();
+      await expect(video).toBeVisible();
+      await expect(audio).toBeVisible();
+      expect(await image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(
+        20
+      );
+      for (const element of [image, video, audio]) {
+        const box = await element.boundingBox();
+        expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      }
+    }
+
+    const fallbackResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === mediaPath &&
+        new URL(response.url()).searchParams.get("path") === "artifacts/demo.mp4",
+      { timeout: 1000 }
+    );
+    await video.locator("a").dispatchEvent("click");
+    const response = await fallbackResponse;
+    expect(response.status()).toBe(200);
+    expect(response.headers()["content-type"]).toContain("video/mp4");
+  });
 });
 
 test.describe("agent replies", () => {
