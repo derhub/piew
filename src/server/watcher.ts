@@ -29,6 +29,10 @@ export class FileWatcher {
     return this.watched.size;
   }
 
+  public paths() {
+    return this.watched.keys();
+  }
+
   public watch(file: string) {
     if (this.watched.has(file)) return;
     if (!fs.existsSync(file)) return;

@@ -2,7 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 
-export const SERVER_PROTOCOL = 3;
+export const SERVER_PROTOCOL = 4;
 
 export function stateDir(): string {
   const custom = process.env.PIEW_DIR;
@@ -20,6 +20,14 @@ export function ensureStateDir(): string {
 
 export function serverRecordPath(): string {
   return path.join(stateDir(), "server.json");
+}
+
+export function daemonLockPath(): string {
+  return path.join(stateDir(), "daemon.lock");
+}
+
+export function daemonLogPath(): string {
+  return path.join(stateDir(), "daemon.log");
 }
 
 export function stateDataPath(): string {

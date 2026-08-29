@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { test, expect } from "@playwright/test";
 import {
   addComment,
@@ -291,6 +293,112 @@ test.describe("on this page", () => {
 
     await expect(page.getByLabel("Show table of contents")).toBeVisible();
     await expect(page.getByRole("button", { name: "Second section" })).toBeHidden();
+  });
+});
+
+test.describe("page loading", () => {
+  test("shows the server error and retries the page", async ({ page, request }) => {
+    const session = await openSession(request);
+    let attempts = 0;
+    let failPage = true;
+    await page.route(
+      `**/api/session/${session.sessionId}/page/${session.pageId}`,
+      async (route) => {
+        attempts += 1;
+        if (failPage) {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({
+              code: "page-corrupt",
+              message: "Stored page is corrupt.",
+              retryable: true,
+            }),
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+
+    await page.goto(`/review/${session.sessionId}`);
+
+    await expect(page.getByRole("alert")).toContainText("Stored page is corrupt.");
+    await expect(page.getByText("Loading fixture.md...")).toHaveCount(0);
+
+    const failedAttempts = attempts;
+    failPage = false;
+    await page.getByRole("button", { name: "Retry" }).click();
+
+    await expect(page.getByRole("heading", { name: "Review fixture" })).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    expect(attempts).toBeGreaterThan(failedAttempts);
+  });
+
+  test("switching pages leaves an aborted request silent", async ({ page, request }) => {
+    const session = await openSession(request);
+    const second = path.join(path.dirname(session.file), "second.md");
+    fs.writeFileSync(second, "# Second review\n\nReady page.\n");
+    await request.put(`/api/session/${session.sessionId}/map`, {
+      data: {
+        title: "Page loading",
+        items: [
+          { path: "fixture.md", source: { kind: "page", pageId: session.pageId } },
+          { path: "second.md", source: { kind: "file", file: second } },
+        ],
+      },
+    });
+
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    await page.route(
+      `**/api/session/${session.sessionId}/page/${session.pageId}`,
+      async (route) => {
+        await firstBlocked;
+        await route
+          .fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({
+              code: "page-corrupt",
+              message: "Superseded page failed.",
+              retryable: true,
+            }),
+          })
+          .catch(() => undefined);
+      }
+    );
+
+    await page.goto(`/review/${session.sessionId}`);
+    await expect(page.getByText("Loading fixture.md...")).toBeVisible();
+
+    await page.getByRole("treeitem", { name: "second.md", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Second review" })).toBeVisible();
+    releaseFirst();
+
+    await expect(page.getByText("Superseded page failed.")).toHaveCount(0);
+  });
+
+  test("times out a page request instead of loading forever", async ({ page, request }) => {
+    const session = await openSession(request);
+    let releaseRequest!: () => void;
+    const requestBlocked = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    await page.route(
+      `**/api/session/${session.sessionId}/page/${session.pageId}`,
+      async (route) => {
+        await requestBlocked;
+        await route.abort().catch(() => undefined);
+      }
+    );
+
+    await page.goto(`/review/${session.sessionId}`);
+    await expect(page.getByText("Loading fixture.md...")).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText("Request timed out", { timeout: 3_000 });
+    releaseRequest();
   });
 });
 

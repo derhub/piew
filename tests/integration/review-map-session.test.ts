@@ -80,8 +80,8 @@ describe("Review Map sessions", () => {
     );
 
     const current = await (await request(`/api/session/${sessionId}`)).json();
-    const saveToDisk = server.store.saveToDisk.bind(server.store);
-    server.store.saveToDisk = () => {
+    const persist = server.store.persist.bind(server.store);
+    server.store.persist = () => {
       throw new Error("disk unavailable");
     };
     const persistenceFailure = await request(`/api/session/${sessionId}/map`, "PUT", {
@@ -91,7 +91,7 @@ describe("Review Map sessions", () => {
         source: { kind: "page", pageId: item.pageId },
       })),
     });
-    server.store.saveToDisk = saveToDisk;
+    server.store.persist = persist;
     expect(persistenceFailure.status).toBe(400);
     expect(JSON.stringify(await (await request(`/api/session/${sessionId}`)).json())).toBe(
       snapshot
@@ -121,6 +121,34 @@ describe("Review Map sessions", () => {
     ).toHaveLength(2);
   });
 
+  it("releases watches for pages removed from the map", async () => {
+    const session = await (await request(`/api/session/${sessionId}`)).json();
+    const extra = path.join(root, "extra.ts");
+    fs.writeFileSync(extra, "export const extra = true;\n");
+    const added = await request(`/api/session/${sessionId}/map`, "PUT", {
+      title: session.reviewMap.title,
+      items: [
+        ...session.reviewMap.items.map((item: { path: string; pageId: string }) => ({
+          path: item.path,
+          source: { kind: "page", pageId: item.pageId },
+        })),
+        { path: "Extra/File", source: { kind: "file", file: extra } },
+      ],
+    });
+    expect(added.status).toBe(200);
+    const watchersWithExtraPage = server.resourceCounts().watchers;
+
+    const removed = await request(`/api/session/${sessionId}/map`, "PUT", {
+      title: session.reviewMap.title,
+      items: session.reviewMap.items.map((item: { path: string; pageId: string }) => ({
+        path: item.path,
+        source: { kind: "page", pageId: item.pageId },
+      })),
+    });
+    expect(removed.status).toBe(200);
+    expect(server.resourceCounts().watchers).toBe(watchersWithExtraPage - 1);
+  });
+
   it("isolates the same file and its feedback between sessions", async () => {
     const other = await (await request("/api/session", "POST", { files: [first] })).json();
     const current = await (await request(`/api/session/${sessionId}`)).json();
@@ -136,12 +164,13 @@ describe("Review Map sessions", () => {
     expect((await otherPoll.json()).status).toBe("timeout");
   });
 
-  it("restores session-owned pages and feedback from state-v3", async () => {
+  it("restores session-owned pages and feedback from schema v4", async () => {
     const restarted = new ReviewServer();
     const session = restarted.store.sessions.get(sessionId);
     expect(session?.reviewMap.title).toBe("Release review");
     expect(Object.values(session?.pages ?? {}).some((page) => page.comments.length > 0)).toBe(true);
-    expect(fs.existsSync(path.join(process.env.PIEW_DIR!, "state-v3.json"))).toBe(true);
-    expect(fs.existsSync(path.join(process.env.PIEW_DIR!, "state.json"))).toBe(false);
+    expect(
+      fs.existsSync(path.join(process.env.PIEW_DIR!, "state-v4", "sessions", `${sessionId}.json`))
+    ).toBe(true);
   });
 });
