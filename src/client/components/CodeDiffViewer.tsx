@@ -379,7 +379,11 @@ export function CodeDiffViewer({
   );
 
   if (!diff && content === undefined) {
-    return <div className="text-muted-foreground p-8 text-sm">Loading {page.filename}...</div>;
+    return (
+      <div role="alert" className="text-destructive p-8 text-sm font-medium">
+        Unable to display {page.filename}.
+      </div>
+    );
   }
 
   if (isBinary) {

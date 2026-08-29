@@ -1,15 +1,29 @@
+import { acquireDaemonLock, releaseDaemonLock } from "../cli/daemon";
 import { ReviewServer } from "./server";
 
+if (!acquireDaemonLock()) process.exit(0);
+
 const server = new ReviewServer();
-await server.start(4173);
+let stopping = false;
 
-// Keep alive
-process.on("SIGTERM", () => {
-  server.stop();
-  process.exit(0);
-});
+function stop(exitCode = 0) {
+  if (stopping) return;
+  stopping = true;
+  try {
+    server.stop();
+  } finally {
+    releaseDaemonLock();
+    process.exit(exitCode);
+  }
+}
 
-process.on("SIGINT", () => {
-  server.stop();
-  process.exit(0);
-});
+process.once("exit", () => releaseDaemonLock());
+process.once("SIGTERM", () => stop());
+process.once("SIGINT", () => stop());
+
+try {
+  await server.start(4173);
+} catch (error) {
+  console.error(error);
+  stop(1);
+}

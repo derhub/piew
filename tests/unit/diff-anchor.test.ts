@@ -1,11 +1,12 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { ReviewServer } from "../../src/server/server";
 import type { ResolvedDiff } from "../../src/server/store";
 
 const RESOLVED: ResolvedDiff = {
-  repoRoot: "/repo",
+  repoRoot: "",
   range: "main..feat",
   staged: false,
   liveHead: false,
@@ -20,6 +21,7 @@ describe("diff annotation anchoring", () => {
   let port: number;
   let sessionId: string;
   let pageId: string;
+  let repoRoot: string;
 
   const post = (route: string, body: unknown) =>
     fetch(`http://127.0.0.1:${port}${route}`, {
@@ -29,16 +31,38 @@ describe("diff annotation anchoring", () => {
     });
 
   beforeAll(async () => {
+    repoRoot = fs.realpathSync(fs.mkdtempSync(path.join(process.env.PIEW_DIR!, "anchor-repo-")));
+    fs.mkdirSync(path.join(repoRoot, "src"));
+    fs.writeFileSync(path.join(repoRoot, "src", "before.ts"), "one\ntwo\nthree\nfour\nfive\nsix\n");
+    fs.writeFileSync(path.join(repoRoot, "src", "dropped.ts"), "one\ntwo\nthree\n");
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: repoRoot });
+    git("init", "-b", "main");
+    git("config", "user.email", "piew@example.test");
+    git("config", "user.name", "Piew Test");
+    git("add", ".");
+    git("commit", "-m", "base");
+    git("switch", "-c", "feat");
+    git("mv", "src/before.ts", "src/after.ts");
+    fs.writeFileSync(
+      path.join(repoRoot, "src", "after.ts"),
+      "one\ntwo changed\nthree\nfour\nfive\nsix changed\n"
+    );
+    git("rm", "src/dropped.ts");
+    git("commit", "-am", "change");
+
     server = new ReviewServer();
     port = await server.start(5897);
 
-    const res = await post("/api/session", { diff: RESOLVED });
+    const res = await post("/api/session", { diff: { ...RESOLVED, repoRoot } });
     const body = await res.json();
     sessionId = body.sessionId;
     pageId = body.reviewMap.items[0].pageId;
   });
 
-  afterAll(() => server.stop());
+  afterAll(() => {
+    server.stop();
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  });
 
   it("refuses a suggested edit on the old side", async () => {
     const res = await post(`/api/session/${sessionId}/page/${pageId}/edit`, {
@@ -200,10 +224,10 @@ describe("diff annotation anchoring", () => {
   });
 
   it("persists a diff page with its own bytes, not as a path to re-read", () => {
-    const stateFile = path.join(process.env.PIEW_DIR!, "state-v3.json");
+    const stateFile = path.join(process.env.PIEW_DIR!, "state-v4", "sessions", `${sessionId}.json`);
     const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
 
-    expect(state.sessions[sessionId].pages[pageId].range).toBeDefined();
+    expect(state.session.pages[pageId].diff.newContent).toBeDefined();
   });
 
   it("restores a diff page with its annotations in a fresh store", () => {

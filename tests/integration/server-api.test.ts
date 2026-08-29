@@ -31,6 +31,19 @@ describe("ReviewServer HTTP API", () => {
     expect(body.port).toBe(port);
   });
 
+  it("does not mutate durable recency when a session is read", async () => {
+    const created = await fetch(`http://127.0.0.1:${port}/api/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [testFile] }),
+    }).then((response) => response.json());
+    const before = server.store.sessions.get(created.sessionId)!.lastSeen;
+
+    await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}`);
+
+    expect(server.store.sessions.get(created.sessionId)!.lastSeen).toBe(before);
+  });
+
   it("creates a session for a document and adds comments", async () => {
     // 1. Create session
     const sessionRes = await fetch(`http://127.0.0.1:${port}/api/session`, {
@@ -95,5 +108,80 @@ describe("ReviewServer HTTP API", () => {
     expect(ackRes.status).toBe(200);
     const ackData = await ackRes.json();
     expect(ackData.status).toBe("timeout");
+  });
+
+  it("restores existing watches and serves a captured page whose source is missing", async () => {
+    const watchersBefore = server.resourceCounts().watchers;
+    const removedFile = path.resolve(__dirname, "removed-after-create.md");
+    fs.writeFileSync(removedFile, "# Captured before removal\n", "utf8");
+    const created = await fetch(`http://127.0.0.1:${port}/api/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [testFile, removedFile] }),
+    }).then((response) => response.json());
+    server.stop();
+    fs.rmSync(removedFile);
+
+    server = new ReviewServer();
+    port = await server.start(5891);
+    const session = await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}`).then(
+      (response) => response.json()
+    );
+    const removedPageId = Object.keys(session.pages).find(
+      (pageId) => session.pages[pageId].file === removedFile
+    )!;
+    const removedPage = await fetch(
+      `http://127.0.0.1:${port}/api/session/${created.sessionId}/page/${removedPageId}`
+    ).then((response) => response.json());
+
+    expect(server.resourceCounts().watchers).toBe(watchersBefore);
+    expect(removedPage.content).toBe("# Captured before removal\n");
+  });
+
+  it("returns typed errors for missing and corrupt pages", async () => {
+    const created = await fetch(`http://127.0.0.1:${port}/api/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [testFile] }),
+    }).then((response) => response.json());
+    server.stop();
+
+    const recordPath = path.join(
+      process.env.PIEW_DIR!,
+      "state-v4",
+      "sessions",
+      `${created.sessionId}.json`
+    );
+    const stored = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+    stored.session.pages[created.activePageId].kind = "diff";
+    delete stored.session.pages[created.activePageId].diff;
+    fs.writeFileSync(recordPath, JSON.stringify(stored));
+
+    server = new ReviewServer();
+    port = await server.start(5892);
+    const missing = await fetch(
+      `http://127.0.0.1:${port}/api/session/${created.sessionId}/page/p_missing`
+    );
+    const corrupt = await fetch(
+      `http://127.0.0.1:${port}/api/session/${created.sessionId}/page/${created.activePageId}`
+    );
+
+    expect({
+      missing: { status: missing.status, body: await missing.json() },
+      corrupt: { status: corrupt.status, body: await corrupt.json() },
+    }).toEqual({
+      missing: {
+        status: 404,
+        body: { code: "page-missing", message: "Page not found", retryable: false },
+      },
+      corrupt: {
+        status: 500,
+        body: {
+          code: "page-corrupt",
+          message: `Captured diff is missing for ${path.basename(testFile)}`,
+          retryable: false,
+        },
+      },
+    });
   });
 });

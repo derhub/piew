@@ -15,7 +15,7 @@ import { ShortcutSheet } from "~/components/ShortcutSheet";
 import { FindBar } from "~/components/FindBar";
 import { useHotkeys } from "~/hooks/use-hotkeys";
 import type { ViewerHandle } from "~/components/Annotation";
-import type { DiffFile, FeedbackTurn, PageMeta, ReviewMap } from "~/lib/types";
+import type { FeedbackTurn, PageContent, PageContentError, PageMeta, ReviewMap } from "~/lib/types";
 
 const CodeDiffViewer = React.lazy(() =>
   import("~/components/CodeDiffViewer").then((module) => ({ default: module.CodeDiffViewer }))
@@ -51,11 +51,21 @@ function savedLayout(): Record<string, number> | undefined {
   }
 }
 
-interface PageContent {
-  kind: PageMeta["kind"];
-  content?: string;
-  diff?: DiffFile;
-  hash: string;
+type PageContentState =
+  | { status: "loading"; pageId: string; revision: number }
+  | { status: "ready"; pageId: string; revision: number; body: PageContent }
+  | { status: "error"; pageId: string; revision: number; message: string };
+
+const PAGE_REQUEST_TIMEOUT_MS = 2_000;
+
+async function pageErrorMessage(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as Partial<PageContentError>;
+    if (typeof body.message === "string" && body.message) return body.message;
+  } catch {
+    // The HTTP status still gives the page a terminal error when the body is malformed.
+  }
+  return `Request failed (${response.status})`;
 }
 
 /**
@@ -169,10 +179,7 @@ function ReviewSessionComponent() {
     }
   }, [sessionId]);
 
-  const [activeContentState, setActiveContentState] = React.useState<{
-    pageId: string;
-    body: PageContent;
-  } | null>(null);
+  const [activeContentState, setActiveContentState] = React.useState<PageContentState | null>(null);
   const [contentRevision, setContentRevision] = React.useState(0);
 
   // Content is fetched per page on open, so the session payload stays flat no
@@ -180,14 +187,59 @@ function ReviewSessionComponent() {
   React.useEffect(() => {
     if (!activeKey) return;
     const controller = new AbortController();
-    void fetch(`/api/session/${sessionId}/page/${activeKey}`, { signal: controller.signal })
-      .then(async (res) => {
-        if (!res.ok) return;
-        const body: PageContent = await res.json();
-        if (!controller.signal.aborted) setActiveContentState({ pageId: activeKey, body });
-      })
-      .catch(() => undefined);
-    return () => controller.abort();
+    const timeout = window.setTimeout(() => {
+      if (controller.signal.aborted) return;
+      setActiveContentState({
+        status: "error",
+        pageId: activeKey,
+        revision: contentRevision,
+        message: "Request timed out",
+      });
+      controller.abort();
+    }, PAGE_REQUEST_TIMEOUT_MS);
+    void (async () => {
+      try {
+        const response = await fetch(`/api/session/${sessionId}/page/${activeKey}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const message = await pageErrorMessage(response);
+          if (!controller.signal.aborted) {
+            setActiveContentState({
+              status: "error",
+              pageId: activeKey,
+              revision: contentRevision,
+              message,
+            });
+          }
+          return;
+        }
+        const body: PageContent = await response.json();
+        if (!controller.signal.aborted) {
+          setActiveContentState({
+            status: "ready",
+            pageId: activeKey,
+            revision: contentRevision,
+            body,
+          });
+        }
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        const detail = cause instanceof Error ? cause.message : "Network request failed";
+        setActiveContentState({
+          status: "error",
+          pageId: activeKey,
+          revision: contentRevision,
+          message: detail,
+        });
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    })();
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
   }, [activeKey, contentRevision, sessionId]);
 
   React.useEffect(() => {
@@ -223,8 +275,13 @@ function ReviewSessionComponent() {
   }, [sessionId, loadSession]);
 
   const activePage = session?.pages[activeKey];
+  const activePageContentState: PageContentState | null = activePage
+    ? activeContentState?.pageId === activeKey && activeContentState.revision === contentRevision
+      ? activeContentState
+      : { status: "loading", pageId: activeKey, revision: contentRevision }
+    : null;
   const activeContent =
-    activeContentState?.pageId === activeKey ? activeContentState.body : undefined;
+    activePageContentState?.status === "ready" ? activePageContentState.body : undefined;
   const activeMapPath = session?.reviewMap.items.find((item) => item.pageId === activeKey)?.path;
   const explorerRef = React.useRef<PanelImperativeHandle | null>(null);
   const [explorerCollapsed, setExplorerCollapsed] = React.useState(false);
@@ -618,7 +675,24 @@ function ReviewSessionComponent() {
           {/* Scroll past the end: the last lines clear the floating action bar,
               and any line can be brought to the middle of the viewport. */}
           <main className="min-w-0 flex-1 pb-[60vh]">
-            {activePage && activePage.kind !== "markdown" ? (
+            {activePage && activePageContentState?.status === "error" ? (
+              <div role="alert" className="flex flex-col items-start gap-3 p-8 text-sm">
+                <p className="text-destructive font-medium">
+                  Could not load {activePage.filename}: {activePageContentState.message}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setContentRevision((revision) => revision + 1)}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : activePage && activePageContentState?.status !== "ready" ? (
+              <div className="text-muted-foreground p-8 text-sm">
+                Loading {activePage.filename}...
+              </div>
+            ) : activePage && activePage.kind !== "markdown" ? (
               <React.Suspense fallback={null}>
                 <CodeDiffViewer
                   page={activePage}

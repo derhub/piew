@@ -1,5 +1,6 @@
 import fs from "node:fs";
-import { canonicalTarget, stateDataPath } from "./paths";
+import path from "node:path";
+import { canonicalTarget, stateDir } from "./paths";
 import { ensureDaemonRunning, openBrowser, readServerRecord, isServerAlive } from "./daemon";
 import { resolveDiff } from "./git";
 import type { ReviewMap } from "../lib/types";
@@ -230,13 +231,14 @@ export async function statusCommand(sessionId: string) {
     }
   }
 
-  // Server offline fallback
-  let data: any = { sessions: {} };
+  let session: any;
   try {
-    data = JSON.parse(fs.readFileSync(stateDataPath(), "utf8"));
+    const stored = JSON.parse(
+      fs.readFileSync(path.join(stateDir(), "state-v4", "sessions", `${sessionId}.json`), "utf8")
+    );
+    if (stored.schemaVersion === 4) session = stored.session;
   } catch {}
 
-  const session = data.sessions?.[sessionId];
   const pending = session?.pendingBatch;
   const pages = Object.values(session?.pages ?? {}) as Array<{ comments: any[]; edits: any[] }>;
 
@@ -254,4 +256,22 @@ export async function statusCommand(sessionId: string) {
     },
   };
   writeJson(payload);
+}
+
+export async function pruneCommand(): Promise<void> {
+  const daemon = await ensureDaemonRunning();
+  const response = await fetch(`http://127.0.0.1:${daemon.port}/api/sessions`, {
+    method: "DELETE",
+    headers: { "x-piew-token": daemon.token },
+  });
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    sessions?: number;
+    files?: number;
+  };
+  if (!response.ok) {
+    console.error(`Prune failed: ${body.error || response.statusText}`);
+    process.exit(1);
+  }
+  writeJson({ sessions: body.sessions ?? 0, files: body.files ?? 0 });
 }

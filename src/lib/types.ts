@@ -79,6 +79,15 @@ export type PageMeta = Omit<PageData, "content" | "diff"> & {
   status?: DiffStatus;
 };
 
+export type PageContent = Pick<PageData, "id" | "kind" | "hash"> &
+  ({ content: string; diff?: never } | { diff: DiffFile; content?: never });
+
+export interface PageContentError {
+  code: "page-missing" | "page-corrupt";
+  message: string;
+  retryable: boolean;
+}
+
 export interface PageFeedback {
   file: string;
   comments: ReviewComment[];

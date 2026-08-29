@@ -4,6 +4,7 @@ import {
   mapCommand,
   openCommand,
   pollCommand,
+  pruneCommand,
   respondCommand,
   statusCommand,
 } from "../src/cli/index";
@@ -23,6 +24,7 @@ Usage:
       --timeout <secs>                Exit with timeout status if no feedback arrives
   piew respond <session-id>           Answer the batch you were given; JSON on stdin
   piew status <session-id>            Check whether feedback is waiting without blocking
+  piew prune                          Remove all stored Piew sessions and session state
 
 Open and diff print compact JSON with the session ID used by every follow-up command:
   piew poll s_123
@@ -116,6 +118,8 @@ if (command === "poll") {
     process.exit(1);
   }
   await statusCommand(sessionId);
+} else if (command === "prune") {
+  await pruneCommand();
 } else {
   // All non-flag arguments are file paths, except the value --timeout takes.
   const files = argv.filter((a, i) => !a.startsWith("-") && argv[i - 1] !== "--timeout");

@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { ReviewMapError, Store, type PruneResult } from "./store";
+import { ReviewMapError, Store } from "./store";
 import { FileWatcher } from "./watcher";
 import { readDiffBlobs, type ResolvedDiff } from "../cli/git";
 import { canonicalTarget, ensureStateDir, SERVER_PROTOCOL, serverRecordPath } from "../cli/paths";
@@ -16,7 +16,6 @@ import type {
 } from "../lib/types";
 
 const STATUSES = new Set<ItemStatus>(["applied", "skipped", "question"]);
-const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 const withoutSent = <T extends { sent?: boolean }>({ sent, ...rest }: T) => rest;
 
@@ -38,7 +37,6 @@ export class ReviewServer {
       timer: ReturnType<typeof setTimeout> | null;
     }>
   >();
-  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private serverInstance: any = null;
   private staticDir: string;
 
@@ -51,15 +49,35 @@ export class ReviewServer {
           if (page.kind === "diff") {
             if (!page.liveHead) continue;
             page.stale = true;
+            this.store.persist(sessionId);
             this.emitToSession(sessionId, "stale", { pageId: page.id, file });
           } else {
-            this.store.reloadPage(page, content, hash);
+            this.store.reloadPage(sessionId, page, content, hash);
             this.emitToSession(sessionId, "reload", { pageId: page.id, file });
           }
         }
       }
-      this.store.saveToDisk();
     });
+    for (const session of this.store.sessions.values()) this.watchSessionSources(session);
+  }
+
+  private watchSessionSources(session: {
+    pages: Record<string, { file: string; kind: string; liveHead?: boolean }>;
+  }): void {
+    for (const page of Object.values(session.pages)) {
+      if (page.kind === "diff" && !page.liveHead) continue;
+      if (fs.existsSync(page.file)) this.watcher.watch(page.file);
+    }
+    const referenced = new Set(
+      [...this.store.sessions.values()].flatMap((stored) =>
+        Object.values(stored.pages)
+          .filter((page) => page.kind !== "diff" || page.liveHead)
+          .map((page) => page.file)
+      )
+    );
+    for (const file of this.watcher.paths()) {
+      if (!referenced.has(file)) this.watcher.unwatch(file);
+    }
   }
 
   private emitToSession(sessionId: string, event: string, data: any) {
@@ -98,17 +116,17 @@ export class ReviewServer {
     }
   }
 
-  public cleanupExpiredSessions(now = Date.now()): PruneResult {
-    const result = this.store.pruneExpiredSessions(now);
-    for (const sessionId of result.sessionIds) this.releaseSessionResources(sessionId);
-    for (const file of result.unreferencedFiles) this.watcher.unwatch(file);
+  public pruneAllSessions(): { sessions: number; files: number } {
+    for (const sessionId of this.store.sessions.keys()) this.releaseSessionResources(sessionId);
+    this.watcher.closeAll();
+    const result = this.store.pruneAll();
     return result;
   }
 
   public resourceCounts() {
     let sse = 0;
     let pollers = 0;
-    let timers = this.cleanupTimer ? 1 : 0;
+    let timers = 0;
     for (const clients of this.sseClients.values()) sse += clients.size;
     for (const pollSet of this.pollers.values()) {
       pollers += pollSet.size;
@@ -329,6 +347,14 @@ export class ReviewServer {
           );
         }
 
+        if (route === "/shutdown" && req.method === "POST") {
+          if (req.headers.get("x-piew-token") !== this.token) {
+            return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+          }
+          setTimeout(() => this.stop(), 10);
+          return Response.json({ ok: true }, { headers: corsHeaders });
+        }
+
         // SSE stream: /events?session=s_123
         if (route === "/events") {
           const sid = url.searchParams.get("session") || "default";
@@ -382,13 +408,22 @@ export class ReviewServer {
           };
 
           if (body.diff) {
-            const sessionInfo = this.store.createDiffSession(body.diff);
-            // Watching is only a staleness signal: a diff page's bytes come from
-            // git, never from a reload.
-            const session = this.store.sessions.get(sessionInfo.id)!;
-            for (const page of Object.values(session.pages)) {
-              if (page && fs.existsSync(page.file)) this.watcher.watch(page.file);
+            const captured: ResolvedDiff = { ...body.diff, files: [] };
+            for (const file of body.diff.files) {
+              try {
+                captured.files.push(readDiffBlobs(body.diff, file));
+              } catch (error) {
+                const name = file.newPath || file.oldPath || "unknown page";
+                const message = error instanceof Error ? error.message : String(error);
+                return Response.json(
+                  { error: `Failed to capture ${name}: ${message}` },
+                  { status: 500, headers: corsHeaders }
+                );
+              }
             }
+            const sessionInfo = this.store.createDiffSession(captured);
+            const session = this.store.sessions.get(sessionInfo.id)!;
+            this.watchSessionSources(session);
             return Response.json(
               {
                 sessionId: sessionInfo.id,
@@ -414,7 +449,6 @@ export class ReviewServer {
                 );
               }
               filePaths.push(canonical.value);
-              this.watcher.watch(canonical.value);
             }
           }
 
@@ -426,6 +460,7 @@ export class ReviewServer {
           }
 
           const sessionInfo = this.store.createSession(filePaths);
+          this.watchSessionSources(this.store.sessions.get(sessionInfo.id)!);
           return Response.json(
             {
               sessionId: sessionInfo.id,
@@ -455,6 +490,13 @@ export class ReviewServer {
           return Response.json({ sessions }, { headers: corsHeaders });
         }
 
+        if (route === "/api/sessions" && req.method === "DELETE") {
+          if (req.headers.get("x-piew-token") !== this.token) {
+            return Response.json({ error: "Unauthorized" }, { status: 401, headers: corsHeaders });
+          }
+          return Response.json(this.pruneAllSessions(), { headers: corsHeaders });
+        }
+
         // GET /api/session/:id
         const sessionMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)$/);
         if (sessionMatch && req.method === "GET") {
@@ -467,7 +509,6 @@ export class ReviewServer {
             );
           }
 
-          session.lastSeen = Date.now();
           // Metadata only. Content is fetched per page on open, so a 500-file
           // range costs the same first render as a single document.
           const pages: Record<string, PageMeta> = {};
@@ -493,10 +534,25 @@ export class ReviewServer {
           try {
             const info = this.store.replaceReviewMap(mapMatch[1], await req.json());
             const session = this.store.sessions.get(info.id)!;
+            const reloadedPageIds: string[] = [];
             for (const page of Object.values(session.pages)) {
-              if (page.kind !== "diff") this.watcher.watch(page.file);
+              if (page.kind === "diff") continue;
+              try {
+                const content = fs.readFileSync(page.file, "utf8");
+                const hash = this.watcher.hash(content);
+                if (hash === page.hash) continue;
+                this.store.reloadPage(info.id, page, content, hash);
+                this.watcher.setLastHash(page.file, hash);
+                reloadedPageIds.push(page.id);
+              } catch {
+                // Keep the captured page when its source is temporarily unavailable.
+              }
             }
+            this.watchSessionSources(session);
             this.emitToSession(info.id, "refresh", { reviewMap: info.reviewMap });
+            for (const pageId of reloadedPageIds) {
+              this.emitToSession(info.id, "reload", { pageId });
+            }
             return Response.json(
               { reviewMap: info.reviewMap, activePageId: info.activePageId },
               { headers: corsHeaders }
@@ -521,43 +577,27 @@ export class ReviewServer {
           const page = this.store.getPage(sid, pageId);
           if (!page)
             return Response.json(
-              { error: "Page not found" },
+              {
+                code: "page-missing",
+                message: "Page not found",
+                retryable: false,
+              },
               { status: 404, headers: corsHeaders }
             );
 
-          // Blobs are read here, not at session creation, so opening a 500-file
-          // range costs one file's bytes rather than the whole range's.
-          if (page.kind === "diff" && page.diff && page.repoRoot && page.range) {
-            const source = {
-              repoRoot: page.repoRoot,
-              range: page.range,
-              staged: !!page.staged,
-              liveHead: !!page.liveHead,
-            };
-            // A range against a commit is immutable, so its blobs stay lazy. A
-            // working-tree side can move under the comments anchored to it, so the
-            // first read freezes it: without that, a restart would re-read the file
-            // and point every anchor at whatever it says now.
-            // ponytail: frozen blobs ride in state-v3.json; a blob store is only worth
-            // it once ranges over huge files start hurting.
-            const frozen =
-              page.liveHead &&
-              (page.diff.newContent !== undefined || page.diff.oldContent !== undefined);
-
-            let diff = page.diff;
-            if (!frozen) {
-              try {
-                diff = readDiffBlobs(source, page.diff);
-              } catch (err: any) {
-                return Response.json({ error: err.message }, { status: 500, headers: corsHeaders });
-              }
-              if (page.liveHead) {
-                page.diff = diff;
-                this.store.saveToDisk();
-              }
+          if (page.kind === "diff") {
+            if (!page.diff) {
+              return Response.json(
+                {
+                  code: "page-corrupt",
+                  message: `Captured diff is missing for ${page.filename}`,
+                  retryable: false,
+                },
+                { status: 500, headers: corsHeaders }
+              );
             }
             return Response.json(
-              { id: page.id, kind: page.kind, diff, hash: page.hash },
+              { id: page.id, kind: page.kind, diff: page.diff, hash: page.hash },
               { headers: corsHeaders }
             );
           }
@@ -589,12 +629,28 @@ export class ReviewServer {
             );
           }
 
-          // Anchors are line numbers into the old content. Refreshing moves them,
-          // so the annotations they point at go with it. Blobs are re-read by the
-          // next content fetch, which is where every diff page gets its bytes.
+          const source = {
+            repoRoot: page.repoRoot!,
+            range: page.range!,
+            staged: !!page.staged,
+            liveHead: true,
+          };
+          let diff;
+          try {
+            diff = readDiffBlobs(source, page.diff);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return Response.json(
+              { code: "page-missing", message, retryable: true },
+              { status: 500, headers: corsHeaders }
+            );
+          }
+
           page.comments = [];
           page.edits = [];
+          page.diff = diff;
           page.stale = false;
+          this.store.persist(sid);
           this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ ok: true }, { headers: corsHeaders });
         }
@@ -827,7 +883,7 @@ export class ReviewServer {
             items: turnItems,
           });
 
-          this.store.saveToDisk();
+          this.store.persist(sessionId);
           this.broadcastAgentState(sessionId);
           return Response.json({ ok: true, delivered }, { headers: corsHeaders });
         }
@@ -885,7 +941,7 @@ export class ReviewServer {
               items,
             };
             session.turns.push(turn);
-            this.store.saveToDisk();
+            this.store.persist(sessionId);
             this.emitToSession(sessionId, "refresh", {});
           }
 
@@ -1045,20 +1101,10 @@ export class ReviewServer {
       "utf8"
     );
 
-    this.cleanupTimer = setInterval(() => {
-      try {
-        this.cleanupExpiredSessions();
-      } catch {}
-    }, SESSION_CLEANUP_INTERVAL_MS);
-
     return this.port;
   }
 
   public stop() {
-    if (this.cleanupTimer) {
-      clearInterval(this.cleanupTimer);
-      this.cleanupTimer = null;
-    }
     for (const sessionId of new Set([...this.sseClients.keys(), ...this.pollers.keys()])) {
       this.releaseSessionResources(sessionId);
     }

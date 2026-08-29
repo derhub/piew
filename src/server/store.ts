@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { ensureStateDir, stateDataPath } from "../cli/paths";
 import type { ResolvedDiff } from "../cli/git";
 import type {
   ItemStatus,
@@ -15,11 +14,11 @@ import type {
   ReviewSession,
   SessionInfo,
 } from "../lib/types";
+import { deleteSession, loadSessions, pruneSessionFiles, saveSession } from "./session-files";
 
 export type { ResolvedDiff, DiffSource } from "../cli/git";
 
 const MARKDOWN_EXT = new Set([".md", ".markdown"]);
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 type LineAnchor = {
   startLine?: number;
@@ -142,24 +141,26 @@ export function normalizeReviewMapRequest(input: unknown): ReplaceReviewMapReque
   return { title: value.title.trim(), items };
 }
 
-interface StoredState {
-  sessions: Record<string, ReviewSession>;
-}
-
-export interface PruneResult {
-  sessionIds: string[];
-  unreferencedFiles: string[];
-}
-
 function isTerminal(item: ReviewComment | ReviewEdit): boolean {
   return item.status === "applied" || item.status === "skipped";
 }
 
 export class Store {
-  public sessions = new Map<string, ReviewSession>();
+  public sessions = loadSessions();
 
   constructor() {
-    this.loadFromDisk();
+    for (const session of this.sessions.values()) {
+      for (const page of Object.values(session.pages)) {
+        if (page.kind === "diff") continue;
+        if (fs.existsSync(page.file)) {
+          page.content = fs.readFileSync(page.file, "utf8");
+          page.hash = this.hash(page.content);
+        }
+        for (const comment of page.comments) reanchor(comment, comment.quote, page.content);
+        for (const edit of page.edits) reanchor(edit, edit.originalText, page.content);
+        this.syncTurnAnchors(page);
+      }
+    }
   }
 
   private hash(content: string): string {
@@ -218,6 +219,17 @@ export class Store {
     };
   }
 
+  private addSession(session: ReviewSession): SessionInfo {
+    this.sessions.set(session.id, session);
+    try {
+      this.persist(session.id);
+    } catch (error) {
+      this.sessions.delete(session.id);
+      throw error;
+    }
+    return this.sessionInfo(session);
+  }
+
   public createSession(files: string[]): SessionInfo {
     const pages = files.map((file) => this.filePage(file));
     const id = this.sessionId();
@@ -229,18 +241,16 @@ export class Store {
       lastSeen: Date.now(),
       turns: [],
     };
-    this.sessions.set(id, session);
-    this.saveToDisk();
-    return this.sessionInfo(session);
+    return this.addSession(session);
   }
 
-  public reloadPage(page: PageData, content: string, hash = this.hash(content)) {
+  public reloadPage(sessionId: string, page: PageData, content: string, hash = this.hash(content)) {
     page.content = content;
     page.hash = hash;
     for (const comment of page.comments) reanchor(comment, comment.quote, content);
     for (const edit of page.edits) reanchor(edit, edit.originalText, content);
     this.syncTurnAnchors(page);
-    this.saveToDisk();
+    this.persist(sessionId);
   }
 
   private syncTurnAnchors(page: PageData) {
@@ -296,9 +306,7 @@ export class Store {
       lastSeen: Date.now(),
       turns: [],
     };
-    this.sessions.set(id, session);
-    this.saveToDisk();
-    return this.sessionInfo(session);
+    return this.addSession(session);
   }
 
   public getPage(sessionId: string, pageId: string): PageData | undefined {
@@ -348,7 +356,7 @@ export class Store {
     };
     this.sessions.set(sessionId, nextSession);
     try {
-      this.saveToDisk();
+      this.persist(sessionId);
     } catch (error) {
       this.sessions.set(sessionId, session);
       throw error;
@@ -360,7 +368,7 @@ export class Store {
     const page = this.getPage(sessionId, pageId);
     if (!page) return null;
     page.comments.push(comment);
-    this.saveToDisk();
+    this.persist(sessionId);
     return page;
   }
 
@@ -374,7 +382,7 @@ export class Store {
     const comment = page?.comments.find((candidate) => candidate.id === commentId);
     if (!page || !comment) return null;
     comment.feedback = feedback;
-    this.saveToDisk();
+    this.persist(sessionId);
     return page;
   }
 
@@ -382,7 +390,7 @@ export class Store {
     const page = this.getPage(sessionId, pageId);
     if (!page) return null;
     page.comments = page.comments.filter((comment) => comment.id !== commentId);
-    this.saveToDisk();
+    this.persist(sessionId);
     return page;
   }
 
@@ -390,7 +398,7 @@ export class Store {
     const page = this.getPage(sessionId, pageId);
     if (!page) return null;
     page.edits.push(edit);
-    this.saveToDisk();
+    this.persist(sessionId);
     return page;
   }
 
@@ -404,7 +412,7 @@ export class Store {
     const edit = page?.edits.find((candidate) => candidate.id === editId);
     if (!page || !edit) return null;
     edit.suggestedText = suggestedText;
-    this.saveToDisk();
+    this.persist(sessionId);
     return page;
   }
 
@@ -412,7 +420,7 @@ export class Store {
     const page = this.getPage(sessionId, pageId);
     if (!page) return null;
     page.edits = page.edits.filter((edit) => edit.id !== editId);
-    this.saveToDisk();
+    this.persist(sessionId);
     return page;
   }
 
@@ -436,7 +444,7 @@ export class Store {
           { from: "agent", text: note.trim(), at: Date.now() },
         ];
       }
-      this.saveToDisk();
+      this.persist(sessionId);
       return { page, item };
     }
     return null;
@@ -446,7 +454,7 @@ export class Store {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.pendingBatch = { batch, delivered: false };
-    this.saveToDisk();
+    this.persist(sessionId);
   }
 
   public getBatch(sessionId: string) {
@@ -457,7 +465,7 @@ export class Store {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     delete session.pendingBatch;
-    this.saveToDisk();
+    this.persist(sessionId);
   }
 
   public clearSentFeedback(sessionId: string): void {
@@ -467,81 +475,23 @@ export class Store {
       page.comments = [];
       page.edits = [];
     }
-    this.saveToDisk();
+    this.persist(sessionId);
   }
 
-  public pruneExpiredSessions(now = Date.now()): PruneResult {
-    const sessionIds: string[] = [];
-    const expiredSessions = new Map<string, ReviewSession>();
-    const expiredFiles = new Set<string>();
-    const cutoff = now - SESSION_TTL_MS;
-
-    for (const [sessionId, session] of this.sessions) {
-      if (session.lastSeen >= cutoff) continue;
-      sessionIds.push(sessionId);
-      expiredSessions.set(sessionId, session);
-      for (const page of Object.values(session.pages)) expiredFiles.add(page.file);
-      this.sessions.delete(sessionId);
-    }
-
-    if (sessionIds.length === 0) return { sessionIds, unreferencedFiles: [] };
-
-    const referencedFiles = new Set<string>();
-    for (const session of this.sessions.values()) {
-      for (const page of Object.values(session.pages)) referencedFiles.add(page.file);
-    }
-    const unreferencedFiles = [...expiredFiles].filter((file) => !referencedFiles.has(file));
-    try {
-      this.saveToDisk();
-    } catch (error) {
-      for (const [sessionId, session] of expiredSessions) this.sessions.set(sessionId, session);
-      throw error;
-    }
-    return { sessionIds, unreferencedFiles };
+  public persist(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) saveSession(session);
   }
 
-  public saveToDisk(): void {
-    ensureStateDir();
-    const target = stateDataPath();
-    const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    try {
-      fs.writeFileSync(
-        temporary,
-        JSON.stringify(
-          { sessions: Object.fromEntries(this.sessions) } satisfies StoredState,
-          null,
-          2
-        ),
-        "utf8"
-      );
-      fs.renameSync(temporary, target);
-    } catch (error) {
-      fs.rmSync(temporary, { force: true });
-      throw error;
-    }
+  public remove(sessionId: string): void {
+    this.sessions.delete(sessionId);
+    deleteSession(sessionId);
   }
 
-  private loadFromDisk(): void {
-    try {
-      const data = JSON.parse(fs.readFileSync(stateDataPath(), "utf8")) as StoredState;
-      const cutoff = Date.now() - SESSION_TTL_MS;
-      for (const session of Object.values(data.sessions ?? {})) {
-        if (session.lastSeen >= cutoff && session.reviewMap && session.pages) {
-          this.sessions.set(session.id, session);
-        }
-      }
-      for (const session of this.sessions.values()) {
-        for (const page of Object.values(session.pages)) {
-          if (page.kind === "diff") continue;
-          if (fs.existsSync(page.file)) {
-            page.content = fs.readFileSync(page.file, "utf8");
-            page.hash = this.hash(page.content);
-          }
-          for (const comment of page.comments) reanchor(comment, comment.quote, page.content);
-          for (const edit of page.edits) reanchor(edit, edit.originalText, page.content);
-          this.syncTurnAnchors(page);
-        }
-      }
-    } catch {}
+  public pruneAll(): { sessions: number; files: number } {
+    const sessions = this.sessions.size;
+    const files = pruneSessionFiles();
+    this.sessions.clear();
+    return { sessions, files };
   }
 }

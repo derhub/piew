@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { ReviewServer } from "../../src/server/server";
 import { resolveDiff } from "../../src/cli/git";
 
-const FILE_COUNT = 40;
+const FILE_COUNT = 500;
 
 function git(args: string[], cwd: string) {
   const res = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -19,6 +19,11 @@ describe("Diff Session Integration", () => {
   let port: number;
   let repo: string;
   let pendingSessionId: string;
+  let watchersBefore: number;
+  let openedSession: Promise<{
+    sessionId: string;
+    reviewMap: { items: Array<{ pageId: string }> };
+  }> | null = null;
 
   const post = (route: string, body: unknown) =>
     fetch(`http://127.0.0.1:${port}${route}`, {
@@ -35,7 +40,7 @@ describe("Diff Session Integration", () => {
     fs.mkdirSync(path.join(repo, "src"));
 
     for (let i = 0; i < FILE_COUNT; i++) {
-      fs.writeFileSync(path.join(repo, "src", `file-${i}.ts`), `const value = ${i};\n`.repeat(200));
+      fs.writeFileSync(path.join(repo, "src", `file-${i}.ts`), `const value = ${i};\n`.repeat(20));
     }
     git(["add", "."], repo);
     git(["commit", "-qm", "base"], repo);
@@ -43,7 +48,7 @@ describe("Diff Session Integration", () => {
     for (let i = 0; i < FILE_COUNT; i++) {
       fs.writeFileSync(
         path.join(repo, "src", `file-${i}.ts`),
-        `const value = ${i + 1};\n`.repeat(200)
+        `const value = ${i + 1};\n`.repeat(20)
       );
     }
     git(["add", "-A"], repo);
@@ -51,6 +56,7 @@ describe("Diff Session Integration", () => {
 
     server = new ReviewServer();
     port = await server.start(5898);
+    watchersBefore = server.resourceCounts().watchers;
   });
 
   afterAll(() => {
@@ -59,11 +65,10 @@ describe("Diff Session Integration", () => {
   });
 
   const openDiff = async () => {
+    if (openedSession) return openedSession;
     const resolved = resolveDiff("HEAD~1..HEAD", { cwd: repo });
-    return (await (await post("/api/session", { diff: resolved })).json()) as {
-      sessionId: string;
-      reviewMap: { items: Array<{ pageId: string }> };
-    };
+    openedSession = post("/api/session", { diff: resolved }).then((response) => response.json());
+    return openedSession;
   };
 
   it("carries no blob through the CLI payload", () => {
@@ -80,13 +85,17 @@ describe("Diff Session Integration", () => {
       await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}`)
     ).json();
 
-    expect(session.reviewMap.items).toHaveLength(FILE_COUNT);
-    for (const page of Object.values(session.pages) as any[]) {
-      expect(page.content).toBeUndefined();
-      expect(page.diff).toBeUndefined();
-      expect(page.filename).toMatch(/^src\/file-\d+\.ts$/);
-    }
-  });
+    expect({
+      count: session.reviewMap.items.length,
+      metadataOnly: Object.values(session.pages).every(
+        (page: any) =>
+          page.content === undefined &&
+          page.diff === undefined &&
+          /^src\/file-\d+\.ts$/.test(page.filename)
+      ),
+    }).toEqual({ count: FILE_COUNT, metadataOnly: true });
+    expect(server.resourceCounts().watchers).toBe(watchersBefore);
+  }, 20_000);
 
   it("serves both blob sides from the per-page route", async () => {
     const created = await openDiff();
@@ -104,6 +113,38 @@ describe("Diff Session Integration", () => {
     expect(page.kind).toBe("diff");
     expect(page.diff.oldContent).toContain("const value = 0;");
     expect(page.diff.newContent).toContain("const value = 1;");
+  });
+
+  it("serves ten pages under 250ms p95 without Git or state writes", async () => {
+    const created = await openDiff();
+    const record = path.join(
+      process.env.PIEW_DIR!,
+      "state-v4",
+      "sessions",
+      `${created.sessionId}.json`
+    );
+    const before = fs.readFileSync(record, "utf8");
+    const movedRepo = `${repo}-offline`;
+    const durations: number[] = [];
+    fs.renameSync(repo, movedRepo);
+    try {
+      for (const item of created.reviewMap.items.slice(0, 10)) {
+        const started = performance.now();
+        const response = await fetch(
+          `http://127.0.0.1:${port}/api/session/${created.sessionId}/page/${item.pageId}`
+        );
+        await response.arrayBuffer();
+        durations.push(performance.now() - started);
+      }
+    } finally {
+      fs.renameSync(movedRepo, repo);
+    }
+    durations.sort((a, b) => a - b);
+
+    expect({
+      recordUnchanged: fs.readFileSync(record, "utf8") === before,
+      p95: durations[Math.floor((durations.length - 1) * 0.95)] < 250,
+    }).toEqual({ recordUnchanged: true, p95: true });
   });
 
   it("polls a diff session by its session ID", async () => {
