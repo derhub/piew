@@ -202,12 +202,7 @@ function AnchoredToolSurface({
   }, [interaction.id, line]);
 
   const surface = (
-    <div
-      className="border-primary/40 mx-4 my-3 border-s-2 ps-3"
-      data-testid="anchored-tools"
-      data-tool-anchor-line={line}
-    >
-      <p className="text-muted-foreground mb-2 text-xs">Agent interaction at line {line}</p>
+    <div className="mx-4 my-3" data-testid="anchored-tools" data-tool-anchor-line={line}>
       <ToolFrame sessionId={sessionId} interaction={interaction} onAction={onAction} />
     </div>
   );
@@ -490,7 +485,7 @@ function ReviewSessionComponent() {
 
       // Jumping to another page fetches its content first, so nothing to scroll to
       // exists for several frames. The card lags its line by another few, since the
-      // viewer has to render the slot that hosts it — hold out for the card, then
+      // viewer has to render the slot that hosts it, so hold out for the card, then
       // settle for the line it annotates.
       // ponytail: a frame budget, not a load event; the viewers do not publish one.
       // Timer, not requestAnimationFrame: a background tab never paints, and a

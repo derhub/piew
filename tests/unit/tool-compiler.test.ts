@@ -65,6 +65,29 @@ describe("tool compiler", () => {
     expect(artifact.files).toEqual(["index.html"]);
   });
 
+  it("installs the Piew resize and theme bridge in the compiled frame", async () => {
+    const artifact = await compileTool({
+      entry: "Tool.tsx",
+      files: {
+        "Tool.tsx":
+          "export default { component({ theme }) { return document.createTextNode(theme); } };",
+      },
+    });
+
+    const html = artifact.contents[0].content.toString();
+    const encoded = html.match(/const source = bytes\("([^"]+)"\)/)?.[1];
+    expect(encoded).toBeDefined();
+    const source = Buffer.from(encoded!, "base64").toString();
+    expect(source).toContain("ResizeObserver");
+    expect(source).toContain("piew:resize");
+    expect(source).toContain("piew:theme");
+    expect(source).toContain("data-piew-theme");
+    expect(source).toContain("color-scheme");
+    expect(source).toContain("button:focus-visible");
+    expect(source).toContain("touch-action:manipulation");
+    expect(source.indexOf("piew:init")).toBeLessThan(source.indexOf("ResizeObserver"));
+  });
+
   it("bundles binary package assets", async () => {
     const artifact = await compileTool({
       entry: "Tool.tsx",
@@ -100,7 +123,10 @@ describe("tool compiler", () => {
 
   it("rejects an oversized source file before compiling", async () => {
     await expect(
-      compileTool({ entry: "Tool.tsx", files: { "Tool.tsx": "x".repeat(256 * 1024 + 1) } })
+      compileTool({
+        entry: "Tool.tsx",
+        files: { "Tool.tsx": "x".repeat(256 * 1024 + 1) },
+      })
     ).rejects.toThrow("256 KiB");
   });
 

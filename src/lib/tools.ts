@@ -58,10 +58,22 @@ echo '<request-json>' | piew tools question <session-id>`,
     source: `import { definePiewTool } from "@derhub/piew/tool";
 
 export default definePiewTool<{ choices: string[] }, string>({
-  component({ data, submit }) {
-    return data.choices.map((choice) => (
-      <button key={choice} onClick={() => submit(choice)}>{choice}</button>
-    ));
+  component({ prompt, data, submit }) {
+    return <fieldset style={{ border: 0, margin: 0, padding: 12 }}>
+      <legend style={{ position: "absolute", width: 1, height: 1, overflow: "hidden" }}>{prompt}</legend>
+      <div role="group" aria-label="Choices" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {data.choices.map((choice) => (
+          <button
+            key={choice}
+            type="button"
+            onClick={() => submit(choice)}
+            style={{ minHeight: 44, maxWidth: "100%", overflowWrap: "anywhere", padding: "10px 16px", border: "1px solid var(--piew-border)", borderRadius: 8, background: "var(--piew-muted)", cursor: "pointer" }}
+          >
+            {choice}
+          </button>
+        ))}
+      </div>
+    </fieldset>;
   },
 });
 `,
@@ -85,10 +97,22 @@ echo '<request-json>' | piew tools rating <session-id>`,
     source: `import { definePiewTool } from "@derhub/piew/tool";
 
 export default definePiewTool<{ min: number; max: number }, number>({
-  component({ data, submit }) {
-    return Array.from({ length: data.max - data.min + 1 }, (_, i) => data.min + i).map((value) => (
-      <button key={value} onClick={() => submit(value)}>{value}</button>
-    ));
+  component({ prompt, data, submit }) {
+    return <fieldset style={{ border: 0, margin: 0, padding: 12 }}>
+      <legend style={{ position: "absolute", width: 1, height: 1, overflow: "hidden" }}>{prompt}</legend>
+      <div role="group" aria-label="Rating" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {Array.from({ length: data.max - data.min + 1 }, (_, i) => data.min + i).map((value) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => submit(value)}
+            style={{ minHeight: 44, minWidth: 44, padding: "10px 16px", border: "1px solid var(--piew-border)", borderRadius: 8, background: "var(--piew-muted)", cursor: "pointer" }}
+          >
+            {value}
+          </button>
+        ))}
+      </div>
+    </fieldset>;
   },
 });
 `,
@@ -113,7 +137,15 @@ echo '<request-json>' | piew tools button <session-id>`,
 
 export default definePiewTool<{ label: string; value: string }, string>({
   component({ data, submit }) {
-    return <button onClick={() => submit(data.value)}>{data.label}</button>;
+    return <div style={{ padding: 12 }}>
+      <button
+        type="button"
+        onClick={() => submit(data.value)}
+        style={{ minHeight: 44, maxWidth: "100%", overflowWrap: "anywhere", padding: "10px 16px", border: "1px solid var(--piew-border)", borderRadius: 8, background: "var(--piew-foreground)", color: "var(--piew-background)", cursor: "pointer" }}
+      >
+        {data.label}
+      </button>
+    </div>;
   },
 });
 `,

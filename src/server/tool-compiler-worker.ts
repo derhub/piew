@@ -128,6 +128,12 @@ function toolEntry(entry: string): string {
 import { createRoot } from "react-dom/client";
 import definition from ${JSON.stringify(`./${entry}`)};
 
+const rootElement = document.getElementById("root");
+const baseline = document.createElement("style");
+baseline.textContent = \
+  ':root{color-scheme:light;--piew-background:#fff;--piew-foreground:#0a0a0a;--piew-muted:#f5f5f5;--piew-border:#e5e5e5}:root[data-piew-theme="dark"]{color-scheme:dark;--piew-background:#0a0a0a;--piew-foreground:#fafafa;--piew-muted:#1f1f1f;--piew-border:#404040}*{box-sizing:border-box}html,body,#root{min-height:100%;margin:0}body{background:var(--piew-background);color:var(--piew-foreground);font:14px/20px system-ui,sans-serif}button,input,textarea,select{font:inherit;color:inherit}button{touch-action:manipulation}button:focus-visible{outline:2px solid var(--piew-foreground);outline-offset:2px}';
+document.head.append(baseline);
+
 class ToolBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -143,31 +149,75 @@ class ToolBoundary extends React.Component {
   }
 }
 
-const root = createRoot(document.getElementById("root"));
-window.addEventListener("message", (event) => {
-  const message = event.data;
-  if (
-    event.source !== window.parent ||
-    !message ||
-    message.type !== "piew:init" ||
-    typeof message.channel !== "string"
-  ) return;
-  const Component = definition.component;
+const root = createRoot(rootElement);
+const Component = definition.component;
+let channel;
+let request;
+let observer;
+
+function validTheme(theme) {
+  return theme === "light" || theme === "dark";
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.piewTheme = theme;
+}
+
+function render() {
   const submit = (value) => window.parent.postMessage({
     type: "piew:submit",
-    channel: message.channel,
+    channel,
     value,
   }, "*");
   root.render(React.createElement(
     ToolBoundary,
     null,
     React.createElement(Component, {
-      prompt: message.prompt,
-      data: message.data,
-      theme: message.theme,
+      prompt: request.prompt,
+      data: request.data,
+      theme: request.theme,
       submit,
     }),
   ));
+}
+
+function reportResize(entries) {
+  const observed = entries[0] && entries[0].contentRect.height;
+  const height = Math.max(rootElement.scrollHeight, observed || 0);
+  if (Number.isFinite(height)) {
+    window.parent.postMessage({ type: "piew:resize", channel, height }, "*");
+  }
+}
+
+window.addEventListener("message", (event) => {
+  const message = event.data;
+  if (event.source !== window.parent || !message) return;
+  if (
+    typeof channel === "string" &&
+    message.type === "piew:theme" &&
+    message.channel === channel &&
+    validTheme(message.theme)
+  ) {
+    request = { ...request, theme: message.theme };
+    applyTheme(request.theme);
+    render();
+    return;
+  }
+  if (
+    channel ||
+    message.type !== "piew:init" ||
+    typeof message.channel !== "string" ||
+    !message.channel ||
+    typeof message.prompt !== "string" ||
+    !validTheme(message.theme)
+  ) return;
+  channel = message.channel;
+  request = { prompt: message.prompt, data: message.data, theme: message.theme };
+  applyTheme(request.theme);
+  render();
+  observer = new ResizeObserver(reportResize);
+  observer.observe(rootElement);
+  reportResize([]);
 });
 window.parent.postMessage({ type: "piew:ready" }, "*");`;
 }
@@ -219,8 +269,13 @@ async function compile(input: Input) {
         name: "piew-tool-files",
         setup(builder) {
           builder.onResolve(
-            { filter: /^(?:react|react\/jsx-runtime|react\/jsx-dev-runtime|react-dom\/client)$/ },
-            (args) => ({ path: fileURLToPath(import.meta.resolve(args.path)), namespace: "file" })
+            {
+              filter: /^(?:react|react\/jsx-runtime|react\/jsx-dev-runtime|react-dom\/client)$/,
+            },
+            (args) => ({
+              path: fileURLToPath(import.meta.resolve(args.path)),
+              namespace: "file",
+            })
           );
           const resolveToolImport = (args: { path: string; importer: string }) => {
             if (!args.path.startsWith(".")) {
@@ -228,7 +283,9 @@ async function compile(input: Input) {
             }
             const resolved = resolveVirtualFile(files, args.importer, args.path);
             if (!resolved) {
-              return { errors: [{ text: `Unresolved or escaped tool import: ${args.path}` }] };
+              return {
+                errors: [{ text: `Unresolved or escaped tool import: ${args.path}` }],
+              };
             }
             return { path: resolved, namespace: "piew-tool" };
           };
@@ -262,11 +319,17 @@ async function compile(input: Input) {
     }))
   );
   if (!outputs.some((file) => file.path === "tool.js")) {
-    return { ok: false as const, diagnostic: "Compiler produced no JavaScript artifact" };
+    return {
+      ok: false as const,
+      diagnostic: "Compiler produced no JavaScript artifact",
+    };
   }
   const bytes = outputs.reduce((total, file) => total + file.content.byteLength, 0);
   if (bytes > MAX_ARTIFACT_BYTES) {
-    return { ok: false as const, diagnostic: "Compiler artifact exceeds 2 MiB" };
+    return {
+      ok: false as const,
+      diagnostic: "Compiler artifact exceeds 2 MiB",
+    };
   }
   return {
     ok: true as const,

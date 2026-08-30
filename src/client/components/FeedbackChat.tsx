@@ -206,7 +206,8 @@ export function FeedbackChat({
                         {clockTime(turn.sentAt)}
                         {turn.items.length > 0 && (
                           <span className="ml-1.5">
-                            {turn.items.length} item{turn.items.length === 1 ? "" : "s"}
+                            {turn.items.length} item
+                            {turn.items.length === 1 ? "" : "s"}
                           </span>
                         )}
                       </MessageHeader>
@@ -373,12 +374,18 @@ const STATUS_EDGE: Record<string, string> = {
   question: "!border-amber-500/50",
 };
 
-export function StatusChip({ status }: { status: string }) {
+const TOOL_STATUS_LABEL: Record<string, string> = {
+  question: "Awaiting your reply",
+  applied: "Applied",
+  skipped: "Skipped",
+};
+
+export function StatusChip({ status, label = status }: { status: string; label?: string }) {
   return (
     <span
       className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${STATUS_STYLE[status] ?? ""}`}
     >
-      {status}
+      {label}
     </span>
   );
 }
@@ -390,7 +397,19 @@ function ToolTranscriptBubble({
   item: Extract<FeedbackTurnItem, { kind: "tool" }>;
   onJump?: () => void;
 }) {
-  const result = item.result.kind === "dismissed" ? "Dismissed" : JSON.stringify(item.result.value);
+  const value = item.result.kind === "dismissed" ? null : item.result.value;
+  const formatted =
+    item.result.kind === "dismissed"
+      ? "Skipped"
+      : value === ""
+        ? "Empty answer"
+        : value === null ||
+            typeof value === "string" ||
+            typeof value === "number" ||
+            typeof value === "boolean"
+          ? String(value)
+          : JSON.stringify(value, null, 2);
+  const result = formatted.length > 8_000 ? `${formatted.slice(0, 8_000)}...` : formatted;
   return (
     <Bubble variant="outline" className="w-full max-w-full">
       <BubbleContent
@@ -406,9 +425,16 @@ function ToolTranscriptBubble({
         <div className="text-muted-foreground flex items-center gap-1.5 text-xs font-medium">
           <Bot className="size-3 shrink-0" />
           <span className="truncate">{item.tool}</span>
-          {item.status && item.status !== "open" && <StatusChip status={item.status} />}
+          {item.status && item.status !== "open" && (
+            <StatusChip
+              status={item.status}
+              label={TOOL_STATUS_LABEL[item.status] ?? item.status}
+            />
+          )}
         </div>
-        <p className="mt-1 text-sm">{result}</p>
+        <pre className="mt-1 max-w-full overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs">
+          {result}
+        </pre>
         {item.replies.length > 0 && (
           <div className="mt-2 flex flex-col gap-1 border-t pt-1.5 text-xs">
             {item.replies.map((reply) => (

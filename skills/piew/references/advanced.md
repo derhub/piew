@@ -92,6 +92,12 @@ does not change an open interaction. The opaque-origin iframe has scripts only; 
 blocks fetch and subresources, while the sandbox blocks host and top-frame access.
 Treat packages as trusted local code because browsers still permit self-navigation.
 
+The host renders the request prompt, tool name, placement, answer, and lifecycle
+status. Do not repeat the prompt in the component. Use a labeled `fieldset` for
+choices, semantic `button` elements with `type="button"`, visible focus, and a
+44-pixel minimum target. Let controls wrap or stack inside the available width;
+keep the request and result data contracts unchanged.
+
 ## Feedback payload
 
 ```json
