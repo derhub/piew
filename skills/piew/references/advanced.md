@@ -41,6 +41,57 @@ A daemon restart restores pages, comments, the transcript, and the exact diff by
 that were originally reviewed. Polling an unacknowledged batch returns it again;
 `--ack` clears only the batch already delivered to the agent.
 
+## Tool packages
+
+Tools live at `$PIEW_DIR/tools/<name>/`, with `~/.piew/tools/` as the default
+registry. `piew tools` reads metadata only. `piew tools <name...> -h` reads direct
+agent instructions without starting the daemon or executing package code.
+
+Every package contains:
+
+```text
+<name>/
+|- tool.json
+|- instructions.md
+`- Tool.tsx
+```
+
+`tool.json` uses this contract:
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "question",
+  "description": "Ask the reviewer to choose",
+  "when": "A human decision blocks progress",
+  "entry": "Tool.tsx",
+  "instructions": "instructions.md"
+}
+```
+
+The directory name must equal `name`. Entry, instruction, and relative asset paths
+must stay below the package directory and resolve to regular files. Package source
+may import React, React DOM, `@derhub/piew/tool`, and relative files only.
+
+```tsx
+import { definePiewTool } from "@derhub/piew/tool";
+
+export default definePiewTool<{ choices: string[] }, string>({
+  component({ data, submit }) {
+    return data.choices.map((choice) => (
+      <button key={choice} onClick={() => submit(choice)}>
+        {choice}
+      </button>
+    ));
+  },
+});
+```
+
+Each invocation compiles an immutable artifact. Editing or deleting the package
+does not change an open interaction. The opaque-origin iframe has scripts only; CSP
+blocks fetch and subresources, while the sandbox blocks host and top-frame access.
+Treat packages as trusted local code because browsers still permit self-navigation.
+
 ## Feedback payload
 
 ```json
@@ -69,13 +120,21 @@ that were originally reviewed. Polling an unacknowledged batch returns it again;
       ]
     }
   ],
+  "tools": [
+    {
+      "id": "ti_123",
+      "tool": "question",
+      "result": { "kind": "submitted", "value": "approve" },
+      "replies": []
+    }
+  ],
   "overall_note": "Feedback not tied to one line."
 }
 ```
 
 `status` is `feedback`, `timeout`, or `closed`. `edits` and an empty
-`overall_note` are omitted. A comment `kind` is `line_range`, `selection`, or
-`general`.
+`overall_note` are omitted. `tools` is omitted when empty. A comment `kind` is
+`line_range`, `selection`, or `general`.
 
 On renamed diffs, old-side comments use the pre-image path and new-side comments or
 edits use the post-image path, so one file may appear as two page entries. Suggested

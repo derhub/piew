@@ -23,7 +23,14 @@ import {
   useMessageScroller,
 } from "~/components/ui/message-scroller";
 import { AgentStatus, type AgentState } from "~/components/AgentStatus";
-import type { FeedbackTurn, FeedbackTurnItem, PageMeta } from "~/lib/types";
+import { ToolFrame, type ToolAction } from "~/components/ToolFrame";
+import type {
+  AnnotationFeedbackTurnItem,
+  FeedbackTurn,
+  FeedbackTurnItem,
+  PageMeta,
+  ToolInteraction,
+} from "~/lib/types";
 
 // The item default defers off-screen layout to a 10rem placeholder, which makes the
 // scroller open at a fake end. A review ledger is tens of turns, so measure them all.
@@ -32,17 +39,20 @@ const ITEM = "[content-visibility:visible]";
 
 interface FeedbackChatProps {
   onCollapse: () => void;
+  sessionId: string;
   pages: Record<string, PageMeta>;
+  tools: Record<string, ToolInteraction>;
   turns: FeedbackTurn[];
   agentState: AgentState;
   onJump: (pageId: string, line?: number, side?: "old" | "new", annotId?: string) => void;
   onDeleteComment: (pageId: string, commentId: string) => void;
   onDeleteEdit: (pageId: string, editId: string) => void;
   onSendFeedback: (overallNote: string) => Promise<void>;
+  onToolAction: (id: string, action: ToolAction) => Promise<void>;
 }
 
-function pendingItems(pages: Record<string, PageMeta>): FeedbackTurnItem[] {
-  const items: FeedbackTurnItem[] = [];
+function pendingItems(pages: Record<string, PageMeta>): AnnotationFeedbackTurnItem[] {
+  const items: AnnotationFeedbackTurnItem[] = [];
   for (const page of Object.values(pages)) {
     for (const c of page.comments) {
       if (c.sent) continue;
@@ -80,7 +90,7 @@ function pendingItems(pages: Record<string, PageMeta>): FeedbackTurnItem[] {
   return items;
 }
 
-function locationLabel(item: FeedbackTurnItem): string {
+function locationLabel(item: Extract<FeedbackTurnItem, { kind: "comment" | "edit" }>): string {
   if (item.orphaned) return "Unplaced";
   if (item.kind === "edit") return `L${item.startLine}-${item.endLine}`;
   if (!item.startLine) return "General";
@@ -97,32 +107,42 @@ function clockTime(iso: string): string {
 
 export function FeedbackChat({
   onCollapse,
+  sessionId,
   pages,
+  tools,
   turns,
   agentState,
   onJump,
   onDeleteComment,
   onDeleteEdit,
   onSendFeedback,
+  onToolAction,
 }: FeedbackChatProps) {
   const [note, setNote] = React.useState("");
   const [isSending, setIsSending] = React.useState(false);
+  const [sendError, setSendError] = React.useState<string | null>(null);
 
   const pending = pendingItems(pages);
-  const canSend = pending.length > 0 || note.trim().length > 0;
+  const generalTools = Object.values(tools).filter((tool) => !tool.request.anchor);
+  const readyToolCount = Object.values(tools).filter((tool) => tool.state === "ready").length;
+  const pendingCount = pending.length + readyToolCount;
+  const canSend = pendingCount > 0 || note.trim().length > 0;
 
   const handleSend = async () => {
     if (!canSend || isSending) return;
     setIsSending(true);
+    setSendError(null);
     try {
       await onSendFeedback(note);
       setNote("");
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : "Could not send feedback");
     } finally {
       setIsSending(false);
     }
   };
 
-  const handleDelete = (item: FeedbackTurnItem) =>
+  const handleDelete = (item: Extract<FeedbackTurnItem, { kind: "comment" | "edit" }>) =>
     item.kind === "comment"
       ? onDeleteComment(item.pageId, item.id)
       : onDeleteEdit(item.pageId, item.id);
@@ -138,14 +158,30 @@ export function FeedbackChat({
       </header>
 
       <p className="text-muted-foreground shrink-0 border-b px-3 py-2 text-sm">
-        {turns.filter((t) => t.from !== "agent").length} sent, {pending.length} pending.
+        {turns.filter((t) => t.from !== "agent").length} sent, {pendingCount} pending.
       </p>
 
       <MessageScrollerProvider defaultScrollPosition="end">
         <MessageScroller className="flex-1">
           <MessageScrollerViewport>
             <MessageScrollerContent className="gap-6 px-4 py-4">
-              {turns.length === 0 && pending.length === 0 ? (
+              {generalTools.length > 0 && (
+                <div className="flex flex-col gap-3" data-testid="general-tools">
+                  <div className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+                    Agent tools
+                  </div>
+                  {generalTools.map((tool) => (
+                    <ToolFrame
+                      key={tool.id}
+                      sessionId={sessionId}
+                      interaction={tool}
+                      onAction={(action) => onToolAction(tool.id, action)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {turns.length === 0 && pending.length === 0 && generalTools.length === 0 ? (
                 <div className="text-muted-foreground flex flex-1 flex-col items-center justify-center gap-2 text-center">
                   <MessageSquare className="size-8 opacity-40" />
                   <p className="text-sm font-medium">No feedback yet</p>
@@ -182,17 +218,35 @@ export function FeedbackChat({
                             : "gap-1.5"
                         }
                       >
-                        {turn.items.map((item, i) => (
-                          <ItemBubble
-                            key={`${turn.id}-${i}`}
-                            item={item}
-                            onJump={
-                              item.orphaned
-                                ? undefined
-                                : () => onJump(item.pageId, item.startLine, item.side, item.id)
-                            }
-                          />
-                        ))}
+                        {turn.items.map((item, i) =>
+                          item.kind === "tool" ? (
+                            <ToolTranscriptBubble
+                              key={`${turn.id}-${i}`}
+                              item={item}
+                              onJump={
+                                item.anchor
+                                  ? () =>
+                                      onJump(
+                                        item.anchor!.pageId,
+                                        item.anchor!.line,
+                                        undefined,
+                                        item.id
+                                      )
+                                  : undefined
+                              }
+                            />
+                          ) : (
+                            <ItemBubble
+                              key={`${turn.id}-${i}`}
+                              item={item}
+                              onJump={
+                                item.orphaned
+                                  ? undefined
+                                  : () => onJump(item.pageId, item.startLine, item.side, item.id)
+                              }
+                            />
+                          )
+                        )}
                         {turn.note && (
                           <Bubble
                             variant={turn.from === "agent" ? "muted" : "default"}
@@ -280,6 +334,11 @@ export function FeedbackChat({
           }}
           className="max-h-40 min-h-20"
         />
+        {sendError && (
+          <p role="alert" className="text-destructive text-xs">
+            {sendError}
+          </p>
+        )}
         <Button onClick={handleSend} disabled={isSending || !canSend}>
           <Send />
           {isSending ? "Sending..." : "Send to agent"}
@@ -324,12 +383,53 @@ export function StatusChip({ status }: { status: string }) {
   );
 }
 
+function ToolTranscriptBubble({
+  item,
+  onJump,
+}: {
+  item: Extract<FeedbackTurnItem, { kind: "tool" }>;
+  onJump?: () => void;
+}) {
+  const result = item.result.kind === "dismissed" ? "Dismissed" : JSON.stringify(item.result.value);
+  return (
+    <Bubble variant="outline" className="w-full max-w-full">
+      <BubbleContent
+        className="w-full rounded-xl px-2.5 py-2"
+        render={
+          onJump ? (
+            <button type="button" onClick={onJump} aria-label={`Show ${item.tool} interaction`} />
+          ) : (
+            <div />
+          )
+        }
+      >
+        <div className="text-muted-foreground flex items-center gap-1.5 text-xs font-medium">
+          <Bot className="size-3 shrink-0" />
+          <span className="truncate">{item.tool}</span>
+          {item.status && item.status !== "open" && <StatusChip status={item.status} />}
+        </div>
+        <p className="mt-1 text-sm">{result}</p>
+        {item.replies.length > 0 && (
+          <div className="mt-2 flex flex-col gap-1 border-t pt-1.5 text-xs">
+            {item.replies.map((reply) => (
+              <p key={`${reply.at}-${reply.text}`}>
+                <span className="font-medium">{reply.from === "agent" ? "Agent" : "You"}:</span>{" "}
+                {reply.text}
+              </p>
+            ))}
+          </div>
+        )}
+      </BubbleContent>
+    </Bubble>
+  );
+}
+
 function ItemBubble({
   item,
   onJump,
   onDelete,
 }: {
-  item: FeedbackTurnItem;
+  item: Extract<FeedbackTurnItem, { kind: "comment" | "edit" }>;
   onJump?: () => void;
   onDelete?: () => void;
 }) {

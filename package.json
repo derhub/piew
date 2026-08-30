@@ -29,6 +29,9 @@
     "dist"
   ],
   "type": "module",
+  "exports": {
+    "./tool": "./src/lib/tool-api.ts"
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -45,6 +48,10 @@
     "fmt:check": "oxfmt --check",
     "check": "oxfmt --check && oxlint && bun test tests/unit tests/integration && playwright test",
     "prepublishOnly": "bun run build"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@base-ui/react": "^1.7.0",
@@ -72,8 +79,6 @@
     "oxfmt": "^0.64.0",
     "oxlint": "^1.79.0",
     "postcss": "^8.5.26",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.12.3",
     "rehype-katex": "^7.0.1",

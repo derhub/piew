@@ -13,6 +13,19 @@ import {
   send,
 } from "./helpers";
 
+async function invokeTool(
+  request: Parameters<typeof openSession>[0],
+  session: Awaited<ReturnType<typeof openSession>>,
+  tool: string,
+  body: Record<string, unknown>
+): Promise<string> {
+  const response = await request.post(`/api/session/${session.sessionId}/tool/${tool}`, {
+    data: body,
+  });
+  expect(response.ok()).toBeTruthy();
+  return ((await response.json()) as { id: string }).id;
+}
+
 test.describe("keyboard", () => {
   test("? opens the shortcut sheet and Escape closes it", async ({ page, request }) => {
     await openReview(page, await openSession(request));
@@ -442,6 +455,118 @@ test.describe("agent replies", () => {
     await page.getByRole("button", { name: "Add comment" }).click();
 
     await expect(page.getByText("1 pending.")).toBeVisible();
+  });
+});
+
+test.describe("agent tools", () => {
+  test("renders a general tool and keeps host controls usable", async ({ page, request }) => {
+    const session = await openSession(request);
+    const id = await invokeTool(request, session, "button", {
+      prompt: "Approve this change",
+      data: { label: "Approve", value: "approve" },
+    });
+
+    await openReview(page, session);
+    const tool = page.locator(`[data-tool-id="${id}"]`);
+    const frame = tool.locator("iframe");
+    await expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+    await expect(tool.getByTestId("tool-status")).toHaveText("open");
+    await frame.contentFrame().getByRole("button", { name: "Approve" }).click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("ready");
+
+    await tool.getByRole("button", { name: "Reset" }).click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("open");
+    await tool.getByRole("button", { name: "Dismiss" }).click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("ready");
+  });
+
+  test("renders an anchored question and accepts a reply after the agent asks", async ({
+    page,
+    request,
+  }) => {
+    const session = await openSession(request);
+    const id = await invokeTool(request, session, "question", {
+      prompt: "Which path should be kept?",
+      data: { choices: ["keep", "change"] },
+      anchor: { pageId: session.pageId, line: 3 },
+    });
+
+    await openReview(page, session);
+    const anchored = page.getByTestId("anchored-tools");
+    const tool = anchored.locator(`[data-tool-id="${id}"]`);
+    await expect(tool).toBeVisible();
+    await expect(
+      page
+        .locator('[data-line-start="3"] + [data-tool-anchor-host]')
+        .locator(`[data-tool-id="${id}"]`)
+    ).toBeVisible();
+    await tool.locator("iframe").contentFrame().getByRole("button", { name: "keep" }).click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("ready");
+
+    await send(request, session);
+    await respond(request, session, { items: [{ id, status: "question", note: "Keep it?" }] });
+    await page.reload();
+    await expect(page.getByTestId("tool-status")).toHaveText("awaiting-answer");
+
+    await tool.getByRole("textbox", { name: "Reply to tool" }).fill("Keep it");
+    await tool.getByRole("button", { name: "Reply" }).click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("ready");
+
+    const fallbackId = await invokeTool(request, session, "button", {
+      prompt: "Visible even when the line is absent",
+      data: { label: "Continue", value: "continue" },
+      anchor: { pageId: session.pageId, line: 999 },
+    });
+    await expect(page.locator(`[data-tool-id="${fallbackId}"]`)).toBeVisible();
+  });
+});
+
+test.describe("tool sandbox", () => {
+  test("blocks parent, storage, fetch, top navigation, and undeclared assets", async ({
+    page,
+    request,
+  }) => {
+    const session = await openSession(request);
+    const id = await invokeTool(request, session, "button", {
+      prompt: "Inspect the sandbox",
+      data: { label: "Continue", value: "continue" },
+    });
+    await openReview(page, session);
+
+    const frame = page.locator(`[data-tool-id="${id}"] iframe`).contentFrame();
+    const result = await frame.locator("body").evaluate(async () => {
+      let parentReadable = false;
+      let storageWritable = false;
+      let networkReachable = false;
+      try {
+        parentReadable = !!window.parent.document.body;
+      } catch {}
+      try {
+        localStorage.setItem("piew-sandbox", "escaped");
+        storageWritable = true;
+      } catch {}
+      try {
+        networkReachable = await fetch("/health").then((response) => response.ok);
+      } catch {}
+      try {
+        window.top!.location.href = "https://example.invalid/escaped";
+      } catch {}
+      const undeclaredAssetLoaded = await new Promise<boolean>((resolve) => {
+        const image = new Image();
+        image.addEventListener("load", () => resolve(true), { once: true });
+        image.addEventListener("error", () => resolve(false), { once: true });
+        image.src = "not-in-manifest.png";
+      });
+      return { parentReadable, storageWritable, networkReachable, undeclaredAssetLoaded };
+    });
+
+    expect(result).toEqual({
+      parentReadable: false,
+      storageWritable: false,
+      networkReachable: false,
+      undeclaredAssetLoaded: false,
+    });
+    expect(page.url()).toContain(`/review/${session.sessionId}`);
   });
 });
 

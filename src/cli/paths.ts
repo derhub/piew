@@ -10,6 +10,14 @@ export function stateDir(): string {
   return path.join(os.homedir(), ".piew");
 }
 
+export function toolsDir(): string {
+  return path.join(stateDir(), "tools");
+}
+
+export function toolPackageDir(name: string): string {
+  return path.join(toolsDir(), name);
+}
+
 export function ensureStateDir(): string {
   const dir = stateDir();
   if (!fs.existsSync(dir)) {

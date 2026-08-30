@@ -8,6 +8,33 @@ description: Open Markdown, source files, or git diffs in the browser for line c
 Piew is a read-only browser review surface. The user comments on rendered files or
 diffs, and the CLI returns line-anchored feedback for the agent to apply.
 
+## Agent-controlled tools
+
+Discover tools before asking the user for structured input:
+
+```sh
+piew tools
+```
+
+Read instructions only for relevant tools; multiple names preserve order:
+
+```sh
+piew tools question rating button -h
+```
+
+Invoke exactly one tool in an existing session. `data` is required and may be
+`null`; use a page ID from `piew map <session-id> --show` for an optional anchor.
+
+```sh
+echo '{"prompt":"Approve this section?","data":{"choices":["approve","reject"]},"anchor":{"pageId":"p_123","line":42}}' |
+  piew tools question s_123
+```
+
+Poll and respond through the normal review loop. A tool item uses the same
+`applied`, `skipped`, or `question` verdicts as an annotation. A question remains
+live after acknowledgement; the reviewer's reply returns under the same tool ID in
+a later batch.
+
 ## Review loop
 
 1. Open one or more files, or a git diff:

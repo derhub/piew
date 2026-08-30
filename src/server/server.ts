@@ -5,9 +5,19 @@ import { ReviewMapError, Store } from "./store";
 import { FileWatcher } from "./watcher";
 import { readDiffBlobs, type ResolvedDiff } from "../cli/git";
 import { canonicalTarget, ensureStateDir, SERVER_PROTOCOL, serverRecordPath } from "../cli/paths";
+import { discoverToolPackages } from "../lib/tools";
+import {
+  CompilerError,
+  compileTool,
+  deleteToolArtifact,
+  readToolArtifact,
+  writeToolArtifact,
+  type CompilerSource,
+} from "./tool-files";
 import type {
   FeedbackTurnItem,
   ItemStatus,
+  JsonValue,
   PageFeedback,
   PageMeta,
   ReviewBatch,
@@ -16,6 +26,66 @@ import type {
 } from "../lib/types";
 
 const STATUSES = new Set<ItemStatus>(["applied", "skipped", "question"]);
+const MAX_TOOL_JSON_BYTES = 64 * 1024;
+const TOOL_TEXT_EXTENSIONS = new Set([
+  ".css",
+  ".html",
+  ".js",
+  ".json",
+  ".jsx",
+  ".md",
+  ".mjs",
+  ".svg",
+  ".ts",
+  ".tsx",
+  ".txt",
+]);
+const TOOL_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline' blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self' data:",
+  "media-src 'self' data:",
+  "connect-src 'none'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "worker-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'",
+].join("; ");
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return (
+    !!value &&
+    typeof value === "object" &&
+    Object.values(value as Record<string, unknown>).every(isJsonValue)
+  );
+}
+
+function toolContentType(file: string): string {
+  const extension = path.extname(file).toLowerCase();
+  if (extension === ".html") return "text/html; charset=utf-8";
+  if (extension === ".js") return "text/javascript; charset=utf-8";
+  if (extension === ".css") return "text/css; charset=utf-8";
+  if (extension === ".svg") return "image/svg+xml";
+  if (extension === ".png") return "image/png";
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+  if (extension === ".gif") return "image/gif";
+  if (extension === ".webp") return "image/webp";
+  if (extension === ".avif") return "image/avif";
+  return "application/octet-stream";
+}
+
+function readToolSource(file: string): CompilerSource {
+  const content = fs.readFileSync(file);
+  return TOOL_TEXT_EXTENSIONS.has(path.extname(file).toLowerCase())
+    ? content.toString("utf8")
+    : { encoding: "base64", content: content.toString("base64") };
+}
 
 const withoutSent = <T extends { sent?: boolean }>({ sent, ...rest }: T) => rest;
 
@@ -192,6 +262,12 @@ export class ReviewServer {
       for (const comment of page.comments) comment.sent = true;
       for (const edit of page.edits) edit.sent = true;
     }
+    this.store.markToolsSent(
+      sessionId,
+      Object.values(session.tools)
+        .filter((tool) => tool.state === "ready")
+        .map((tool) => tool.id)
+    );
   }
 
   /** Each Send carries only what the agent has not seen, so a second press never re-delivers. */
@@ -276,6 +352,17 @@ export class ReviewServer {
           orphaned: e.orphaned,
         });
       }
+    }
+    for (const tool of Object.values(session.tools)) {
+      if (tool.state !== "ready") continue;
+      items.push({
+        id: tool.id,
+        kind: "tool",
+        tool: tool.tool,
+        result: tool.result,
+        replies: tool.replies,
+        anchor: tool.request.anchor,
+      });
     }
     return items;
   }
@@ -523,6 +610,7 @@ export class ReviewServer {
               reviewMap: session.reviewMap,
               pages,
               turns: session.turns,
+              tools: session.tools,
               agentState: this.agentState(sid),
             },
             { headers: corsHeaders }
@@ -875,6 +963,216 @@ export class ReviewServer {
           return Response.json({ ok: true, page }, { headers: corsHeaders });
         }
 
+        const toolArtifactMatch = route.match(
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/tool\/([a-zA-Z0-9_]+)(?:\/(.+))?$/
+        );
+        if (toolArtifactMatch && req.method === "GET") {
+          const [, sessionId, interactionId, requested = "index.html"] = toolArtifactMatch;
+          const interaction = this.store.sessions.get(sessionId)?.tools[interactionId];
+          if (!interaction) {
+            return Response.json(
+              { error: "Tool interaction not found" },
+              { status: 404, headers: corsHeaders }
+            );
+          }
+          const content = readToolArtifact(sessionId, interactionId, requested);
+          if (!content) {
+            return Response.json(
+              { error: "Tool artifact not found" },
+              { status: 404, headers: corsHeaders }
+            );
+          }
+          return new Response(content, {
+            headers: {
+              "Content-Type": toolContentType(requested),
+              "Content-Security-Policy": TOOL_CSP,
+              "X-Content-Type-Options": "nosniff",
+              "Cache-Control": "private, max-age=31536000, immutable",
+            },
+          });
+        }
+
+        const toolInvokeMatch = route.match(
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/tool\/([a-zA-Z0-9_-]+)$/
+        );
+        if (toolInvokeMatch && req.method === "POST") {
+          const [, sessionId, toolName] = toolInvokeMatch;
+          const session = this.store.sessions.get(sessionId);
+          if (!session) {
+            return Response.json(
+              { error: "Session not found" },
+              { status: 404, headers: corsHeaders }
+            );
+          }
+          const raw = await req.text();
+          if (new TextEncoder().encode(raw).byteLength > MAX_TOOL_JSON_BYTES) {
+            return Response.json(
+              { error: "Tool request exceeds 64 KiB" },
+              { status: 413, headers: corsHeaders }
+            );
+          }
+          let request: Record<string, unknown>;
+          try {
+            request = JSON.parse(raw) as Record<string, unknown>;
+          } catch {
+            return Response.json(
+              { error: "Invalid tool request JSON" },
+              { status: 400, headers: corsHeaders }
+            );
+          }
+          if (
+            !request ||
+            typeof request !== "object" ||
+            Array.isArray(request) ||
+            typeof request.prompt !== "string" ||
+            !("data" in request) ||
+            !isJsonValue(request.data)
+          ) {
+            return Response.json(
+              { error: "Tool request requires prompt and JSON data" },
+              { status: 400, headers: corsHeaders }
+            );
+          }
+          let anchor: { pageId: string; line: number } | undefined;
+          if (request.anchor !== undefined) {
+            const value = request.anchor as Record<string, unknown>;
+            if (
+              !value ||
+              typeof value !== "object" ||
+              Array.isArray(value) ||
+              typeof value.pageId !== "string" ||
+              !session.pages[value.pageId] ||
+              !Number.isInteger(value.line) ||
+              (value.line as number) < 1
+            ) {
+              return Response.json(
+                { error: "Tool anchor must reference a session page and positive line" },
+                { status: 400, headers: corsHeaders }
+              );
+            }
+            anchor = { pageId: value.pageId, line: value.line as number };
+          }
+
+          const discovery = discoverToolPackages();
+          const tool = discovery.packages.find((candidate) => candidate.name === toolName);
+          if (!tool) {
+            const invalid = discovery.invalid.find((message) => message.startsWith(`${toolName}:`));
+            return Response.json(
+              { error: invalid || `Unknown tool package: ${toolName}` },
+              { status: invalid ? 400 : 404, headers: corsHeaders }
+            );
+          }
+
+          const interactionId = `ti_${crypto.randomBytes(6).toString("hex")}`;
+          let artifactWritten = false;
+          try {
+            const files = Object.fromEntries(
+              tool.files.map((file) => [file, readToolSource(path.join(tool.directory, file))])
+            );
+            const compiled = await compileTool({ entry: tool.entry, files });
+            const artifact = writeToolArtifact(sessionId, interactionId, compiled.contents);
+            artifactWritten = true;
+            const added = this.store.addTool(sessionId, {
+              id: interactionId,
+              tool: tool.name,
+              state: "open",
+              request: {
+                prompt: request.prompt,
+                data: request.data,
+                ...(anchor ? { anchor } : {}),
+              },
+              artifact,
+              createdAt: Date.now(),
+              replies: [],
+            });
+            if (!added) {
+              deleteToolArtifact(sessionId, interactionId);
+              artifactWritten = false;
+              return Response.json(
+                { error: "Session was removed while compiling the tool" },
+                { status: 404, headers: corsHeaders }
+              );
+            }
+            this.emitToSession(sessionId, "refresh", {});
+            return Response.json(
+              { status: "open", id: interactionId, tool: tool.name },
+              { headers: corsHeaders }
+            );
+          } catch (error) {
+            if (artifactWritten) {
+              deleteToolArtifact(sessionId, interactionId);
+            }
+            const message = error instanceof Error ? error.message : String(error);
+            return Response.json(
+              { error: message },
+              { status: error instanceof CompilerError ? 400 : 500, headers: corsHeaders }
+            );
+          }
+        }
+
+        const toolActionMatch = route.match(
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/tool\/([a-zA-Z0-9_]+)\/action$/
+        );
+        if (toolActionMatch && req.method === "POST") {
+          const [, sessionId, interactionId] = toolActionMatch;
+          const session = this.store.sessions.get(sessionId);
+          if (!session) {
+            return Response.json(
+              { error: "Session not found" },
+              { status: 404, headers: corsHeaders }
+            );
+          }
+          if (!session.tools[interactionId]) {
+            return Response.json(
+              { error: "Tool interaction not found" },
+              { status: 404, headers: corsHeaders }
+            );
+          }
+
+          const raw = await req.text();
+          if (new TextEncoder().encode(raw).byteLength > MAX_TOOL_JSON_BYTES) {
+            return Response.json(
+              { error: "Tool action exceeds 64 KiB" },
+              { status: 413, headers: corsHeaders }
+            );
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = JSON.parse(raw) as Record<string, unknown>;
+          } catch {
+            return Response.json(
+              { error: "Invalid tool action JSON" },
+              { status: 400, headers: corsHeaders }
+            );
+          }
+
+          const action =
+            body.action === "submit" && "value" in body && isJsonValue(body.value)
+              ? ({ type: "submit", value: body.value } as const)
+              : body.action === "dismiss"
+                ? ({ type: "dismiss" } as const)
+                : body.action === "reset"
+                  ? ({ type: "reset" } as const)
+                  : body.action === "reply" && typeof body.text === "string"
+                    ? ({ type: "reply", text: body.text } as const)
+                    : null;
+          if (!action) {
+            return Response.json(
+              { error: "Invalid tool action" },
+              { status: 400, headers: corsHeaders }
+            );
+          }
+          const interaction = this.store.actOnTool(sessionId, interactionId, action);
+          if (!interaction) {
+            return Response.json(
+              { error: "Tool action is not valid in the current state" },
+              { status: 409, headers: corsHeaders }
+            );
+          }
+          this.emitToSession(sessionId, "refresh", {});
+          return Response.json({ ok: true, interaction }, { headers: corsHeaders });
+        }
+
         const sendMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/send$/);
         if (sendMatch && req.method === "POST") {
           const body = (await req.json().catch(() => ({}))) as {
@@ -889,8 +1187,20 @@ export class ReviewServer {
             );
           }
 
+          if (session.pendingBatch) {
+            return Response.json(
+              { error: "A feedback batch is still awaiting acknowledgement" },
+              { status: 409, headers: corsHeaders }
+            );
+          }
+
           const pagesFeedback = this.collectFeedback(sessionId);
-          if (pagesFeedback.length === 0 && !body.overallNote?.trim()) {
+          const toolsFeedback = this.store.readyTools(sessionId);
+          if (
+            pagesFeedback.length === 0 &&
+            toolsFeedback.length === 0 &&
+            !body.overallNote?.trim()
+          ) {
             return Response.json(
               { error: "No feedback or note to send" },
               { status: 400, headers: corsHeaders }
@@ -900,6 +1210,7 @@ export class ReviewServer {
           const batch: ReviewBatch = {
             status: "feedback",
             pages: pagesFeedback,
+            ...(toolsFeedback.length ? { tools: toolsFeedback } : {}),
             overall_note: body.overallNote?.trim() || "",
             sent_at: new Date().toISOString(),
             next_step:
@@ -951,24 +1262,39 @@ export class ReviewServer {
               continue;
             }
             const hit = this.store.setItemStatus(sessionId, entry.id, entry.status, entry.note);
-            if (!hit) {
+            if (hit) {
+              const { page, item } = hit;
+              items.push({
+                id: item.id,
+                kind: "suggestedText" in item ? "edit" : "comment",
+                status: entry.status,
+                pageId: page.id,
+                filename: page.filename,
+                file: item.file,
+                startLine: item.startLine,
+                endLine: item.endLine,
+                feedback: entry.note,
+                orphaned: item.orphaned,
+              });
+              this.emitToSession(sessionId, "refresh", { pageId: page.id });
+              continue;
+            }
+
+            const tool = this.store.setToolStatus(sessionId, entry.id, entry.status, entry.note);
+            if (!tool || tool.state === "open") {
               unknown.push(entry.id);
               continue;
             }
-            const { page, item } = hit;
             items.push({
-              id: item.id,
-              kind: "suggestedText" in item ? "edit" : "comment",
+              id: tool.id,
+              kind: "tool",
               status: entry.status,
-              pageId: page.id,
-              filename: page.filename,
-              file: item.file,
-              startLine: item.startLine,
-              endLine: item.endLine,
-              feedback: entry.note,
-              orphaned: item.orphaned,
+              tool: tool.tool,
+              result: tool.result,
+              replies: tool.replies,
+              anchor: tool.request.anchor,
             });
-            this.emitToSession(sessionId, "refresh", { pageId: page.id });
+            this.emitToSession(sessionId, "refresh", {});
           }
 
           if (items.length || body.note?.trim()) {

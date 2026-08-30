@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import type { ResolvedDiff } from "../cli/git";
 import type {
   ItemStatus,
+  JsonValue,
   PageData,
   PageKind,
   ReplaceReviewMapRequest,
@@ -13,6 +14,8 @@ import type {
   ReviewMap,
   ReviewSession,
   SessionInfo,
+  ToolFeedback,
+  ToolInteraction,
 } from "../lib/types";
 import { deleteSession, loadSessions, pruneSessionFiles, saveSession } from "./session-files";
 
@@ -150,6 +153,7 @@ export class Store {
 
   constructor() {
     for (const session of this.sessions.values()) {
+      session.tools ??= {};
       for (const page of Object.values(session.pages)) {
         if (page.kind === "diff") continue;
         if (fs.existsSync(page.file)) {
@@ -240,6 +244,7 @@ export class Store {
       pages: Object.fromEntries(pages.map((page) => [page.id, page])),
       lastSeen: Date.now(),
       turns: [],
+      tools: {},
     };
     return this.addSession(session);
   }
@@ -305,6 +310,7 @@ export class Store {
       pages: Object.fromEntries(pages.map((page) => [page.id, page])),
       lastSeen: Date.now(),
       turns: [],
+      tools: {},
     };
     return this.addSession(session);
   }
@@ -448,6 +454,102 @@ export class Store {
       return { page, item };
     }
     return null;
+  }
+
+  public addTool(sessionId: string, interaction: ToolInteraction): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.tools[interaction.id]) return false;
+    session.tools[interaction.id] = interaction;
+    try {
+      this.persist(sessionId);
+    } catch (error) {
+      delete session.tools[interaction.id];
+      throw error;
+    }
+    return true;
+  }
+
+  public readyTools(sessionId: string): ToolFeedback[] {
+    const session = this.sessions.get(sessionId);
+    if (!session) return [];
+    return Object.values(session.tools).flatMap((tool) =>
+      tool.state === "ready"
+        ? [
+            {
+              id: tool.id,
+              tool: tool.tool,
+              result: tool.result,
+              replies: tool.replies,
+              anchor: tool.request.anchor,
+            },
+          ]
+        : []
+    );
+  }
+
+  public markToolsSent(sessionId: string, ids: string[]): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    for (const id of ids) {
+      const tool = session.tools[id];
+      if (tool?.state === "ready") session.tools[id] = { ...tool, state: "sent" };
+    }
+    this.persist(sessionId);
+  }
+
+  public actOnTool(
+    sessionId: string,
+    id: string,
+    action:
+      | { type: "submit"; value: JsonValue }
+      | { type: "dismiss" }
+      | { type: "reset" }
+      | { type: "reply"; text: string }
+  ): ToolInteraction | null {
+    const session = this.sessions.get(sessionId);
+    const tool = session?.tools[id];
+    if (!session || !tool) return null;
+
+    let next: ToolInteraction | null = null;
+    if (action.type === "submit" && tool.state === "open") {
+      next = { ...tool, state: "ready", result: { kind: "submitted", value: action.value } };
+    } else if (action.type === "dismiss" && tool.state === "open") {
+      next = { ...tool, state: "ready", result: { kind: "dismissed" } };
+    } else if (action.type === "reset" && tool.state === "ready" && tool.replies.length === 0) {
+      const { result: _result, ...base } = tool;
+      next = { ...base, state: "open" };
+    } else if (action.type === "reply" && tool.state === "awaiting-answer" && action.text.trim()) {
+      next = {
+        ...tool,
+        state: "ready",
+        replies: [...tool.replies, { from: "user", text: action.text.trim(), at: Date.now() }],
+      };
+    }
+    if (!next) return null;
+    session.tools[id] = next;
+    this.persist(sessionId);
+    return next;
+  }
+
+  public setToolStatus(
+    sessionId: string,
+    id: string,
+    status: ItemStatus,
+    note?: string
+  ): ToolInteraction | null {
+    const session = this.sessions.get(sessionId);
+    const tool = session?.tools[id];
+    if (!session || tool?.state !== "sent" || status === "open") return null;
+    const replies = note?.trim()
+      ? [...tool.replies, { from: "agent" as const, text: note.trim(), at: Date.now() }]
+      : tool.replies;
+    const next: ToolInteraction =
+      status === "question"
+        ? { ...tool, state: "awaiting-answer", replies }
+        : { ...tool, state: "resolved", status, replies };
+    session.tools[id] = next;
+    this.persist(sessionId);
+    return next;
   }
 
   public setBatch(sessionId: string, batch: ReviewBatch): void {

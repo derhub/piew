@@ -1,4 +1,5 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import { createRoute } from "@tanstack/react-router";
 import { Route as rootRoute } from "./__root";
 import { DocumentSidebar } from "~/components/DocumentSidebar";
@@ -6,6 +7,7 @@ import { TableOfContents } from "~/components/TableOfContents";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { ImageViewer, isImageUrl } from "~/components/ImageViewer";
 import { FeedbackChat } from "~/components/FeedbackChat";
+import { ToolFrame, type ToolAction } from "~/components/ToolFrame";
 import { Button } from "~/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "~/components/ui/resizable";
 import type { PanelImperativeHandle } from "react-resizable-panels";
@@ -16,7 +18,14 @@ import { ShortcutSheet } from "~/components/ShortcutSheet";
 import { FindBar } from "~/components/FindBar";
 import { useHotkeys } from "~/hooks/use-hotkeys";
 import type { ViewerHandle } from "~/components/Annotation";
-import type { FeedbackTurn, PageContent, PageContentError, PageMeta, ReviewMap } from "~/lib/types";
+import type {
+  FeedbackTurn,
+  PageContent,
+  PageContentError,
+  PageMeta,
+  ReviewMap,
+  ToolInteraction,
+} from "~/lib/types";
 
 const CodeDiffViewer = React.lazy(() =>
   import("~/components/CodeDiffViewer").then((module) => ({ default: module.CodeDiffViewer }))
@@ -35,6 +44,7 @@ interface SessionState {
   agentState: "idle" | "listening" | "working" | "stranded";
   pages: Record<string, PageMeta>;
   turns: FeedbackTurn[];
+  tools: Record<string, ToolInteraction>;
 }
 
 // Panel widths are a per-machine preference, so they live where the machine keeps
@@ -67,6 +77,11 @@ async function pageErrorMessage(response: Response): Promise<string> {
     // The HTTP status still gives the page a terminal error when the body is malformed.
   }
   return `Request failed (${response.status})`;
+}
+
+async function actionErrorMessage(response: Response): Promise<string> {
+  const body = (await response.json().catch(() => ({}))) as { error?: string };
+  return body.error || `Request failed (${response.status})`;
 }
 
 /**
@@ -141,6 +156,64 @@ function setPanelOpen(
     still reporting zero width is mid-layout, not a phone. */
 const isNarrow = () =>
   typeof window !== "undefined" && window.innerWidth > 0 && window.innerWidth < 768;
+
+function AnchoredToolSurface({
+  sessionId,
+  interaction,
+  onAction,
+}: {
+  sessionId: string;
+  interaction: ToolInteraction;
+  onAction: (action: ToolAction) => Promise<void>;
+}) {
+  const line = interaction.request.anchor?.line;
+  const [host, setHost] = React.useState<HTMLDivElement | null>(null);
+  const [missing, setMissing] = React.useState(false);
+
+  React.useLayoutEffect(() => {
+    if (!line) return;
+    let cancelled = false;
+    let frame = 0;
+    let frameId = 0;
+    let container: HTMLDivElement | null = null;
+
+    const attach = () => {
+      const target = lineElement(line);
+      if (target) {
+        container = document.createElement("div");
+        container.dataset.toolAnchorHost = interaction.id;
+        target.after(container);
+        if (!cancelled) setHost(container);
+        return;
+      }
+      if (!cancelled && frame++ < 60) {
+        frameId = requestAnimationFrame(attach);
+      } else if (!cancelled) {
+        setMissing(true);
+      }
+    };
+
+    attach();
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frameId);
+      container?.remove();
+    };
+  }, [interaction.id, line]);
+
+  const surface = (
+    <div
+      className="border-primary/40 mx-4 my-3 border-s-2 ps-3"
+      data-testid="anchored-tools"
+      data-tool-anchor-line={line}
+    >
+      <p className="text-muted-foreground mb-2 text-xs">Agent interaction at line {line}</p>
+      <ToolFrame sessionId={sessionId} interaction={interaction} onAction={onAction} />
+    </div>
+  );
+  if (host) return createPortal(surface, host);
+  return missing ? surface : null;
+}
 
 function ReviewSessionComponent() {
   const { sessionId } = Route.useParams();
@@ -444,10 +517,28 @@ function ReviewSessionComponent() {
 
   const handleSendFeedback = React.useCallback(
     async (note?: string) => {
-      await call(`/api/session/${sessionId}/send`, {
+      const response = await call(`/api/session/${sessionId}/send`, {
         method: "POST",
         body: JSON.stringify({ overallNote: note }),
       });
+      if (!response.ok) throw new Error(await actionErrorMessage(response));
+    },
+    [call, sessionId]
+  );
+
+  const handleToolAction = React.useCallback(
+    async (id: string, action: ToolAction) => {
+      const body =
+        action.type === "submit"
+          ? { action: "submit", value: action.value }
+          : action.type === "reply"
+            ? { action: "reply", text: action.text }
+            : { action: action.type };
+      const response = await call(`/api/session/${sessionId}/tool/${id}/action`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) throw new Error(await actionErrorMessage(response));
     },
     [call, sessionId]
   );
@@ -599,11 +690,15 @@ function ReviewSessionComponent() {
   }
 
   const allPages = Object.values(session.pages);
-  const unsentCount = allPages.reduce(
-    (acc, p) =>
-      acc + p.comments.filter((c) => !c.sent).length + p.edits.filter((e) => !e.sent).length,
-    0
+  const anchoredTools = Object.values(session.tools ?? {}).filter(
+    (tool) => tool.request.anchor?.pageId === activeKey
   );
+  const unsentCount =
+    allPages.reduce(
+      (acc, p) =>
+        acc + p.comments.filter((c) => !c.sent).length + p.edits.filter((e) => !e.sent).length,
+      0
+    ) + Object.values(session.tools ?? {}).filter((tool) => tool.state === "ready").length;
 
   return (
     <ResizablePanelGroup
@@ -758,6 +853,15 @@ function ReviewSessionComponent() {
                 Select a document from the sidebar.
               </div>
             )}
+
+            {anchoredTools.map((tool) => (
+              <AnchoredToolSurface
+                key={tool.id}
+                sessionId={sessionId}
+                interaction={tool}
+                onAction={(action) => handleToolAction(tool.id, action)}
+              />
+            ))}
           </main>
 
           {activePage?.kind === "markdown" && (
@@ -798,7 +902,9 @@ function ReviewSessionComponent() {
             position once, and a collapsed panel has no layout to measure. */}
         {(!feedbackCollapsed || overlay === "feedback") && (
           <FeedbackChat
+            sessionId={sessionId}
             pages={session.pages}
+            tools={session.tools ?? {}}
             turns={session.turns ?? []}
             agentState={session.agentState}
             onCollapse={() =>
@@ -808,6 +914,7 @@ function ReviewSessionComponent() {
             onDeleteComment={deleteComment}
             onDeleteEdit={deleteEdit}
             onSendFeedback={handleSendFeedback}
+            onToolAction={handleToolAction}
           />
         )}
       </ResizablePanel>

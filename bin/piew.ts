@@ -8,6 +8,7 @@ import {
   respondCommand,
   statusCommand,
 } from "../src/cli/index";
+import { toolsCommand } from "../src/cli/tools";
 
 const HELP = `piew - portable review
 
@@ -45,6 +46,12 @@ Local review tool powered by Bun, TanStack Router, and Base UI.
 `;
 
 const argv = process.argv.slice(2);
+const command = argv[0];
+
+if (command === "tools") {
+  await toolsCommand(argv.slice(1));
+  process.exit(process.exitCode ?? 0);
+}
 
 if (argv.length === 0 || argv.includes("-h") || argv.includes("--help")) {
   console.log(HELP);
@@ -66,7 +73,6 @@ function timeoutFrom(args: string[]): number {
   return 0;
 }
 
-const command = argv[0];
 const wait = argv.includes("--wait");
 
 if (command === "poll") {

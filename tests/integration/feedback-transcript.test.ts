@@ -53,6 +53,9 @@ describe("Feedback Transcript", () => {
   });
 
   it("carries only the annotations the agent has not seen", async () => {
+    await fetch(`${base()}/api/session/${sessionId}/poll?timeout=1`);
+    await fetch(`${base()}/api/session/${sessionId}/poll?ack=1&timeout=1`);
+
     await post(`/api/session/${sessionId}/page/${pageId}/comment`, {
       startLine: 2,
       feedback: "second",
