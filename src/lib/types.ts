@@ -1,3 +1,7 @@
+import type { JsonValue } from "./tool-api";
+
+export type { JsonValue } from "./tool-api";
+
 export type PageKind = "markdown" | "diff" | "file";
 
 export type DiffStatus = "added" | "modified" | "deleted" | "renamed";
@@ -94,15 +98,63 @@ export interface PageFeedback {
   edits?: ReviewEdit[];
 }
 
+export interface ToolAnchor {
+  pageId: string;
+  line: number;
+}
+
+export interface ToolRequest {
+  prompt: string;
+  data: JsonValue;
+  anchor?: ToolAnchor;
+}
+
+export interface ToolArtifact {
+  digest: string;
+  files: string[];
+  bytes: number;
+}
+
+export type ToolResult = { kind: "submitted"; value: JsonValue } | { kind: "dismissed" };
+
+interface ToolInteractionBase {
+  id: string;
+  tool: string;
+  request: ToolRequest;
+  artifact: ToolArtifact;
+  createdAt: number;
+  replies: Reply[];
+}
+
+export type ToolInteraction =
+  | (ToolInteractionBase & { state: "open" })
+  | (ToolInteractionBase & { state: "ready"; result: ToolResult })
+  | (ToolInteractionBase & { state: "sent"; result: ToolResult })
+  | (ToolInteractionBase & { state: "awaiting-answer"; result: ToolResult })
+  | (ToolInteractionBase & {
+      state: "resolved";
+      result: ToolResult;
+      status: "applied" | "skipped";
+    });
+
+export interface ToolFeedback {
+  id: string;
+  tool: string;
+  result: ToolResult;
+  replies: Reply[];
+  anchor?: ToolAnchor;
+}
+
 export interface ReviewBatch {
   status: "feedback" | "timeout" | "closed";
   pages: PageFeedback[];
+  tools?: ToolFeedback[];
   overall_note?: string;
   sent_at: string;
   next_step?: string;
 }
 
-export interface FeedbackTurnItem {
+export interface AnnotationFeedbackTurnItem {
   id: string;
   kind: "comment" | "edit";
   status?: ItemStatus;
@@ -118,6 +170,18 @@ export interface FeedbackTurnItem {
   suggestedText?: string;
   orphaned?: boolean;
 }
+
+export interface ToolFeedbackTurnItem {
+  id: string;
+  kind: "tool";
+  status?: ItemStatus;
+  tool: string;
+  result: ToolResult;
+  replies: Reply[];
+  anchor?: ToolAnchor;
+}
+
+export type FeedbackTurnItem = AnnotationFeedbackTurnItem | ToolFeedbackTurnItem;
 
 /** One press of Send, kept for the browser transcript. Dies with the session. */
 export interface FeedbackTurn {
@@ -160,6 +224,7 @@ export interface ReviewSession {
   pages: Record<string, PageData>;
   lastSeen: number;
   turns: FeedbackTurn[];
+  tools: Record<string, ToolInteraction>;
   pendingBatch?: { batch: ReviewBatch; delivered: boolean };
 }
 

@@ -70,6 +70,40 @@ echo '{
 Map paths are ordered exactly as supplied and may contain up to five slash-separated
 segments. Updating a map is all-or-nothing.
 
+List the interactive tools available to the agent:
+
+```sh
+bunx @derhub/piew tools
+bunx @derhub/piew tools question rating button -h
+```
+
+Invoke one tool in an existing review session with JSON on stdin:
+
+```sh
+echo '{"prompt":"Ship this release?","data":{"choices":["approve","reject"]}}' |
+  bunx @derhub/piew tools question s_123
+```
+
+Tools live in `$PIEW_DIR/tools/<name>/`, or `~/.piew/tools/<name>/` by default.
+The first run seeds `question`, `rating`, and `button`. Each package contains
+`tool.json`, direct agent instructions, and a React `Tool.tsx` component. Piew never
+overwrites an existing package.
+
+```text
+question/
+|- tool.json
+|- instructions.md
+`- Tool.tsx
+```
+
+Tool components may import relative package files, React, React DOM, and
+`@derhub/piew/tool`. Compilation rejects runtime environment access, macros, dynamic
+imports, external URLs, path escapes, and undeclared modules. The browser runs the
+compiled artifact in an opaque-origin, script-only iframe; CSP blocks fetch and
+subresources, and the sandbox blocks host and top-frame access. Tool packages are
+trusted local code: browsers still allow a sandboxed frame to navigate itself, so do
+not install packages from untrusted sources.
+
 Wait for a submitted feedback batch:
 
 ```sh

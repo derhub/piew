@@ -92,6 +92,8 @@ describe("session storage", () => {
       fs.writeFileSync(path.join(sessionsDir, "s_legacy.json"), JSON.stringify({ schemaVersion: 3, session: { id: "s_legacy" } }));
       fs.writeFileSync(path.join(sessionsDir, "s_broken.json"), "{not-json");
       const valid = JSON.parse(fs.readFileSync(path.join(sessionsDir, created.id + ".json"), "utf8"));
+      delete valid.session.tools;
+      fs.writeFileSync(path.join(sessionsDir, created.id + ".json"), JSON.stringify(valid));
       fs.writeFileSync(path.join(sessionsDir, "s_invalid.json"), JSON.stringify({
         schemaVersion: 4,
         session: {
@@ -112,14 +114,62 @@ describe("session storage", () => {
       console.log(JSON.stringify({
         ids: [...restored.sessions.keys()],
         createdId: created.id,
+        tools: restored.sessions.get(created.id).tools,
         legacyExists: fs.existsSync(path.join(sessionsDir, "s_legacy.json")),
         quarantined: fs.readdirSync(path.join(process.env.PIEW_DIR, "state-v4", "quarantine")).length,
       }));
     `);
 
     expect(result.ids).toEqual([result.createdId]);
+    expect(result.tools).toEqual({});
     expect(result.legacyExists).toBe(true);
     expect(result.quarantined).toBe(2);
+  });
+
+  it("restores owned artifacts and removes deleted, quarantined, and orphaned artifacts", async () => {
+    const source = path.join(root, "tools.md");
+    fs.writeFileSync(source, "# Tools\n");
+    const result = await runIsolated(`
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const { Store } = await import(${JSON.stringify(STORE_MODULE)});
+      const tools = await import(${JSON.stringify(pathToFileURL(path.resolve(__dirname, "../../src/server/tool-files.ts")).href)});
+      const store = new Store();
+      const kept = store.createSession([${JSON.stringify(source)}]);
+      const removed = store.createSession([${JSON.stringify(source)}]);
+      const broken = store.createSession([${JSON.stringify(source)}]);
+      for (const session of [kept, removed, broken]) {
+        const id = "ti_" + session.id.slice(2);
+        const artifact = tools.writeToolArtifact(session.id, id, [{ path: "index.html", content: "ok" }]);
+        store.addTool(session.id, {
+          id, tool: "button", state: "open", request: { prompt: "Continue", data: null },
+          artifact, createdAt: Date.now(), replies: [],
+        });
+      }
+      tools.writeToolArtifact("s_orphan", "ti_orphan", [{ path: "index.html", content: "orphan" }]);
+      store.remove(removed.id);
+
+      const brokenRecord = path.join(process.env.PIEW_DIR, "state-v4", "sessions", broken.id + ".json");
+      const invalid = JSON.parse(fs.readFileSync(brokenRecord, "utf8"));
+      invalid.session.tools["ti_" + broken.id.slice(2)].artifact.files = ["../escape"];
+      fs.writeFileSync(brokenRecord, JSON.stringify(invalid));
+
+      const restored = new Store();
+      const keptId = "ti_" + kept.id.slice(2);
+      console.log(JSON.stringify({
+        kept: fs.existsSync(tools.toolArtifactDir(kept.id, keptId)),
+        keptTools: Object.keys(restored.sessions.get(kept.id).tools),
+        removed: fs.existsSync(tools.toolArtifactDir(removed.id, "ti_" + removed.id.slice(2))),
+        broken: fs.existsSync(tools.toolArtifactDir(broken.id, "ti_" + broken.id.slice(2))),
+        orphan: fs.existsSync(tools.toolArtifactDir("s_orphan", "ti_orphan")),
+      }));
+    `);
+
+    expect(result.kept).toBe(true);
+    expect(result.keptTools).toHaveLength(1);
+    expect(result.removed).toBe(false);
+    expect(result.broken).toBe(false);
+    expect(result.orphan).toBe(false);
   });
 
   it("prunes every stored session without deleting reviewed sources", async () => {

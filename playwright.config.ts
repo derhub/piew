@@ -1,6 +1,12 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
 const PORT = 5910;
+const E2E_STATE_DIR =
+  process.env.PIEW_E2E_DIR ?? fs.mkdtempSync(path.join(os.tmpdir(), "piew-e2e-"));
+process.env.PIEW_E2E_DIR = E2E_STATE_DIR;
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -30,5 +36,6 @@ export default defineConfig({
     url: `http://127.0.0.1:${PORT}/health`,
     reuseExistingServer: false,
     stdout: "pipe",
+    env: { PIEW_DIR: E2E_STATE_DIR },
   },
 });

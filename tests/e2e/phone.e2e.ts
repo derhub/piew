@@ -3,6 +3,19 @@ import path from "node:path";
 import { test, expect } from "@playwright/test";
 import { openReview, openSession, panelWidth } from "./helpers";
 
+async function invokeTool(
+  request: Parameters<typeof openSession>[0],
+  session: Awaited<ReturnType<typeof openSession>>,
+  body: Record<string, unknown>,
+  tool = "button"
+): Promise<string> {
+  const response = await request.post(`/api/session/${session.sessionId}/tool/${tool}`, {
+    data: body,
+  });
+  expect(response.ok()).toBeTruthy();
+  return ((await response.json()) as { id: string }).id;
+}
+
 test.describe("on a phone", () => {
   test("opens on the document alone, with both panels away", async ({ page, request }) => {
     await openReview(page, await openSession(request));
@@ -28,6 +41,57 @@ test.describe("on a phone", () => {
     expect(await panelWidth(page, "content")).toBeGreaterThanOrEqual(screen - 4);
   });
 
+  test("keeps a general tool within the narrow feedback rail", async ({ page, request }) => {
+    const session = await openSession(request);
+    const id = await invokeTool(request, session, {
+      prompt: "ApproveThisVeryLongUnbrokenReviewerCheckpoint",
+      data: {
+        label: "ApproveThisVeryLongUnbrokenReviewerAction",
+        value: "approve",
+      },
+    });
+    await openReview(page, session);
+    await page.getByRole("button", { name: "Show feedback" }).click();
+
+    const tool = page.locator(`[data-tool-id="${id}"]`);
+    await expect(tool).toBeVisible();
+    const card = await tool.boundingBox();
+    expect(card!.x + card!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    const frame = tool.locator("iframe");
+    const control = frame
+      .contentFrame()
+      .getByRole("button", { name: "ApproveThisVeryLongUnbrokenReviewerAction" });
+    const controlBox = await control.boundingBox();
+    const frameBox = await frame.boundingBox();
+    expect(controlBox!.height).toBeGreaterThanOrEqual(44);
+    expect(controlBox!.width).toBeGreaterThanOrEqual(44);
+    expect(controlBox!.width).toBeLessThanOrEqual(frameBox!.width);
+  });
+
+  test("clamps a tall tool and scrolls inside its frame", async ({ page, request }) => {
+    const session = await openSession(request);
+    const id = await invokeTool(
+      request,
+      session,
+      {
+        prompt: "Rate every option",
+        data: { min: 1, max: 100 },
+      },
+      "rating"
+    );
+    await openReview(page, session);
+    await page.getByRole("button", { name: "Show feedback" }).click();
+
+    const frame = page.locator(`[data-tool-id="${id}"] iframe`);
+    await expect(frame).toHaveCSS("height", "480px");
+    const child = frame.contentFrame();
+    await expect
+      .poll(() =>
+        child.locator("html").evaluate((element) => element.scrollHeight > element.clientHeight)
+      )
+      .toBeTruthy();
+  });
+
   test("a block can be annotated without a hover", async ({ page, request }) => {
     await openReview(page, await openSession(request));
 
@@ -50,7 +114,10 @@ test.describe("on a phone", () => {
             path: "Project/First/fixture.md",
             source: { kind: "page", pageId: session.pageId },
           },
-          { path: "Project/Second/second.md", source: { kind: "file", file: second } },
+          {
+            path: "Project/Second/second.md",
+            source: { kind: "file", file: second },
+          },
         ],
       },
     });

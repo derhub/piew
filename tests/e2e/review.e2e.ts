@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+import { ensureToolRegistry } from "../../src/lib/tools";
 import {
   addComment,
   chat,
@@ -12,6 +13,72 @@ import {
   respond,
   send,
 } from "./helpers";
+
+async function invokeTool(
+  request: Parameters<typeof openSession>[0],
+  session: Awaited<ReturnType<typeof openSession>>,
+  tool: string,
+  body: Record<string, unknown>
+): Promise<string> {
+  const response = await request.post(`/api/session/${session.sessionId}/tool/${tool}`, {
+    data: body,
+  });
+  expect(response.ok()).toBeTruthy();
+  return ((await response.json()) as { id: string }).id;
+}
+
+async function holdNextToolAction(page: Page, sessionId: string, interactionId: string) {
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    `**/api/session/${sessionId}/tool/${interactionId}/action`,
+    async (route) => {
+      await gate;
+      await route.continue();
+    },
+    { times: 1 }
+  );
+  return release;
+}
+
+function installStatefulThemeTool() {
+  const state = process.env.PIEW_E2E_DIR;
+  if (!state) throw new Error("PIEW_E2E_DIR is not configured");
+  const registry = ensureToolRegistry(path.join(state, "tools"));
+  const directory = path.join(registry, "stateful-theme");
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(
+    path.join(directory, "tool.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      name: "stateful-theme",
+      description: "Test theme updates",
+      when: "An E2E test verifies preserved component state",
+      entry: "Tool.tsx",
+      instructions: "instructions.md",
+    })
+  );
+  fs.writeFileSync(path.join(directory, "instructions.md"), "E2E fixture.\n");
+  fs.writeFileSync(
+    path.join(directory, "Tool.tsx"),
+    `import React from "react";
+import { definePiewTool } from "@derhub/piew/tool";
+
+export default definePiewTool<null, number>({
+  component({ theme }) {
+    const [count, setCount] = React.useState(0);
+    return <div style={{ padding: 12 }}>
+      <p>Theme: {theme}</p>
+      <output aria-label="Counter">{count}</output>
+      <button type="button" onClick={() => setCount((value) => value + 1)}>Increment</button>
+    </div>;
+  },
+});
+`
+  );
+}
 
 test.describe("keyboard", () => {
   test("? opens the shortcut sheet and Escape closes it", async ({ page, request }) => {
@@ -442,6 +509,209 @@ test.describe("agent replies", () => {
     await page.getByRole("button", { name: "Add comment" }).click();
 
     await expect(page.getByText("1 pending.")).toBeVisible();
+  });
+});
+
+test.describe("agent tools", () => {
+  test("renders a general tool and keeps host controls usable", async ({ page, request }) => {
+    const session = await openSession(request);
+    const id = await invokeTool(request, session, "button", {
+      prompt: "Approve this change",
+      data: { label: "Approve", value: "approve" },
+    });
+
+    await openReview(page, session);
+    const tool = page.locator(`[data-tool-id="${id}"]`);
+    const frame = tool.locator("iframe");
+    await expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+    await expect(tool.getByTestId("tool-prompt")).toHaveText("Approve this change");
+    await expect(tool.getByTestId("tool-status")).toHaveText("Needs your input");
+    const child = frame.contentFrame();
+    const control = child.getByRole("button", { name: "Approve" });
+    const controlBox = await control.boundingBox();
+    expect(controlBox!.height).toBeGreaterThanOrEqual(44);
+    await control.focus();
+    await expect
+      .poll(() => control.evaluate((element) => document.activeElement === element))
+      .toBeTruthy();
+    const firstTheme = await child.locator("html").getAttribute("data-piew-theme");
+    await page.locator("html").evaluate((element) => element.classList.toggle("dark"));
+    await expect
+      .poll(() => child.locator("html").getAttribute("data-piew-theme"))
+      .toBe(firstTheme === "dark" ? "light" : "dark");
+    await expect
+      .poll(() => control.evaluate((element) => document.activeElement === element))
+      .toBeTruthy();
+    await child.locator("body").evaluate(async () => {
+      window.parent.postMessage(
+        { type: "piew:submit", channel: "wrong-channel", value: "escaped" },
+        "*"
+      );
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+    });
+    await expect(tool).toHaveAttribute("data-tool-state", "open");
+    await expect(frame).toHaveCount(1);
+    const releaseSubmit = await holdNextToolAction(page, session.sessionId, id);
+    await control.click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("Saving answer...");
+    releaseSubmit();
+    await expect(tool.getByTestId("tool-status")).toHaveText("Ready to send");
+    await expect(tool.getByTestId("tool-result")).toHaveText("approve");
+    await expect(frame).toHaveCount(0);
+
+    const releaseReset = await holdNextToolAction(page, session.sessionId, id);
+    await tool.getByRole("button", { name: "Reset" }).click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("Resetting...");
+    releaseReset();
+    await expect(tool.getByTestId("tool-status")).toHaveText("Needs your input");
+    await expect(tool.getByRole("button", { name: "Skip this question" })).toBeVisible();
+    const releaseDismiss = await holdNextToolAction(page, session.sessionId, id);
+    await tool.getByRole("button", { name: "Skip this question" }).click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("Skipping question...");
+    releaseDismiss();
+    await expect(tool.getByTestId("tool-status")).toHaveText("Ready to send");
+
+    const emptyId = await invokeTool(request, session, "button", {
+      prompt: "Allow an empty answer",
+      data: { label: "Submit empty", value: "" },
+    });
+    await page.reload();
+    const emptyTool = page.locator(`[data-tool-id="${emptyId}"]`);
+    await emptyTool
+      .locator("iframe")
+      .contentFrame()
+      .getByRole("button", { name: "Submit empty" })
+      .click();
+    await expect(emptyTool.getByTestId("tool-result")).toHaveText("Empty answer");
+  });
+
+  test("preserves custom tool state across theme changes", async ({ page, request }) => {
+    installStatefulThemeTool();
+    const session = await openSession(request);
+    const id = await invokeTool(request, session, "stateful-theme", {
+      prompt: "Keep local state while changing theme",
+      data: null,
+    });
+    await openReview(page, session);
+
+    const frame = page.locator(`[data-tool-id="${id}"] iframe`).contentFrame();
+    await frame.getByRole("button", { name: "Increment" }).click();
+    await expect(frame.getByLabel("Counter")).toHaveText("1");
+    const firstTheme = await frame.getByText(/^Theme:/).textContent();
+
+    await page.locator("html").evaluate((element) => element.classList.toggle("dark"));
+    await expect(frame.getByText(/^Theme:/)).not.toHaveText(firstTheme!);
+    await expect(frame.getByLabel("Counter")).toHaveText("1");
+  });
+
+  test("renders an anchored question and accepts a reply after the agent asks", async ({
+    page,
+    request,
+  }) => {
+    const session = await openSession(request);
+    const id = await invokeTool(request, session, "question", {
+      prompt: "Which path should be kept?",
+      data: { choices: ["keep", "change"] },
+      anchor: { pageId: session.pageId, line: 3 },
+    });
+
+    await openReview(page, session);
+    const anchored = page.getByTestId("anchored-tools");
+    const tool = anchored.locator(`[data-tool-id="${id}"]`);
+    await expect(tool).toBeVisible();
+    await expect(
+      page
+        .locator('[data-line-start="3"] + [data-tool-anchor-host]')
+        .locator(`[data-tool-id="${id}"]`)
+    ).toBeVisible();
+    await tool.locator("iframe").contentFrame().getByRole("button", { name: "keep" }).click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("Ready to send");
+
+    await send(request, session);
+    await page.reload();
+    await expect(page.getByTestId("tool-status")).toHaveText("Sent");
+    await expect(tool.getByRole("button", { name: "Reset" })).toHaveCount(0);
+    await request.get(`/api/session/${session.sessionId}/poll`);
+    await request.get(`/api/session/${session.sessionId}/poll?ack=1&timeout=1`);
+    await respond(request, session, { items: [{ id, status: "question", note: "Keep it?" }] });
+    await page.reload();
+    await expect(page.getByTestId("tool-status")).toHaveText("Awaiting your reply");
+
+    await tool.getByRole("textbox", { name: "Reply to tool" }).fill("Keep it");
+    const releaseReply = await holdNextToolAction(page, session.sessionId, id);
+    await tool.getByRole("button", { name: "Reply" }).click();
+    await expect(tool.getByTestId("tool-status")).toHaveText("Replying...");
+    releaseReply();
+    await expect(tool.getByTestId("tool-status")).toHaveText("Ready to send");
+    await expect(tool.locator("iframe")).toHaveCount(0);
+
+    const secondSend = await request.post(`/api/session/${session.sessionId}/send`, {
+      data: { overallNote: "" },
+    });
+    expect(secondSend.ok(), await secondSend.text()).toBeTruthy();
+    await request.get(`/api/session/${session.sessionId}/poll`);
+    await request.get(`/api/session/${session.sessionId}/poll?ack=1&timeout=1`);
+    await respond(request, session, { items: [{ id, status: "applied", note: "Accepted" }] });
+    await page.reload();
+    await expect(page.getByTestId("tool-status")).toHaveText("Applied");
+    await expect(tool.getByRole("button", { name: "Reset" })).toHaveCount(0);
+
+    const fallbackId = await invokeTool(request, session, "button", {
+      prompt: "Visible even when the line is absent",
+      data: { label: "Continue", value: "continue" },
+      anchor: { pageId: session.pageId, line: 999 },
+    });
+    await expect(page.locator(`[data-tool-id="${fallbackId}"]`)).toBeVisible();
+  });
+});
+
+test.describe("tool sandbox", () => {
+  test("blocks parent, storage, fetch, top navigation, and undeclared assets", async ({
+    page,
+    request,
+  }) => {
+    const session = await openSession(request);
+    const id = await invokeTool(request, session, "button", {
+      prompt: "Inspect the sandbox",
+      data: { label: "Continue", value: "continue" },
+    });
+    await openReview(page, session);
+
+    const frame = page.locator(`[data-tool-id="${id}"] iframe`).contentFrame();
+    const result = await frame.locator("body").evaluate(async () => {
+      let parentReadable = false;
+      let storageWritable = false;
+      let networkReachable = false;
+      try {
+        parentReadable = !!window.parent.document.body;
+      } catch {}
+      try {
+        localStorage.setItem("piew-sandbox", "escaped");
+        storageWritable = true;
+      } catch {}
+      try {
+        networkReachable = await fetch("/health").then((response) => response.ok);
+      } catch {}
+      try {
+        window.top!.location.href = "https://example.invalid/escaped";
+      } catch {}
+      const undeclaredAssetLoaded = await new Promise<boolean>((resolve) => {
+        const image = new Image();
+        image.addEventListener("load", () => resolve(true), { once: true });
+        image.addEventListener("error", () => resolve(false), { once: true });
+        image.src = "not-in-manifest.png";
+      });
+      return { parentReadable, storageWritable, networkReachable, undeclaredAssetLoaded };
+    });
+
+    expect(result).toEqual({
+      parentReadable: false,
+      storageWritable: false,
+      networkReachable: false,
+      undeclaredAssetLoaded: false,
+    });
+    expect(page.url()).toContain(`/review/${session.sessionId}`);
   });
 });
 
