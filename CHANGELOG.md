@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/derhub/piew/compare/v0.4.0...v0.5.0) (2026-08-30)
+
+
+### Features
+
+* **review:** add image artifact viewer ([f8a4430](https://github.com/derhub/piew/commit/f8a44300d3dca198f99dda94d4076132c2af006d))
+* **review:** add image artifact viewer ([05c62b4](https://github.com/derhub/piew/commit/05c62b4cef5fb390f053bd49bcaac0704d94119f))
+* **tools:** add agent-controlled review tools ([1c89094](https://github.com/derhub/piew/commit/1c890940301ee47709e01635750dc6a83c324a90))
+* **tools:** add agent-controlled review tools ([f5fb9db](https://github.com/derhub/piew/commit/f5fb9db6fa41349694f514add19f3b62c2099cf0))
+* **tools:** improve reviewer tool UX ([ebefa55](https://github.com/derhub/piew/commit/ebefa55a2a04a0247acc8e4effc28396cc8b1850))
+
 ## [0.4.0](https://github.com/derhub/piew/compare/v0.3.0...v0.4.0) (2026-08-29)
 
 
