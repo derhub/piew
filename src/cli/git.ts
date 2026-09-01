@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import type { DiffFile, DiffStatus } from "../lib/types";
 
@@ -130,23 +131,28 @@ function isBinary(buf: Buffer): boolean {
   return buf.subarray(0, 8000).includes(0);
 }
 
-function readSide(side: Side, filePath: string, root: string): string | undefined {
+function readSide(side: Side, filePath: string, root: string): { content?: string; hash?: string } {
+  let bytes: Buffer;
   if (side.kind === "worktree") {
     try {
       const fullPath = path.join(root, filePath);
-      const buf = fs.lstatSync(fullPath).isSymbolicLink()
+      bytes = fs.lstatSync(fullPath).isSymbolicLink()
         ? Buffer.from(fs.readlinkSync(fullPath))
         : fs.readFileSync(fullPath);
-      return isBinary(buf) ? undefined : buf.toString("utf8");
     } catch {
-      return undefined;
+      return {};
     }
+  } else {
+    if (side.kind === "merge-base") return {};
+    const spec = side.kind === "index" ? `:${filePath}` : `${side.ref}:${filePath}`;
+    const result = gitBuffer(["show", spec], root);
+    if (!result.ok) return {};
+    bytes = result.stdout;
   }
-  if (side.kind === "merge-base") return undefined;
-  const spec = side.kind === "index" ? `:${filePath}` : `${side.ref}:${filePath}`;
-  const res = gitBuffer(["show", spec], root);
-  if (!res.ok || isBinary(res.stdout)) return undefined;
-  return res.stdout.toString("utf8");
+  return {
+    hash: crypto.createHash("sha1").update(bytes).digest("hex"),
+    ...(isBinary(bytes) ? {} : { content: bytes.toString("utf8") }),
+  };
 }
 
 export function diffArgs(range: string, staged: boolean): string[] {
@@ -199,11 +205,14 @@ export function readDiffBlobs(source: DiffSource, file: DiffFile): DiffFile {
     source.range === "working-tree" || source.range === "--staged" ? "" : source.range;
   const { base, head } = endpoints(rawRange, source.staged);
   const resolvedBase = resolveSide(base, source.repoRoot);
+  const oldSide = file.oldPath ? readSide(resolvedBase, file.oldPath, source.repoRoot) : {};
+  const newSide = file.newPath ? readSide(head, file.newPath, source.repoRoot) : {};
 
   return {
     ...file,
-    oldContent: file.oldPath ? readSide(resolvedBase, file.oldPath, source.repoRoot) : undefined,
-    newContent: file.newPath ? readSide(head, file.newPath, source.repoRoot) : undefined,
+    oldContent: oldSide.content,
+    newContent: newSide.content,
+    newHash: newSide.hash,
   };
 }
 

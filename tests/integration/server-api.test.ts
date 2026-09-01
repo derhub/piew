@@ -2,6 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from "bun:test";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { ReviewServer } from "../../src/server/server";
 
 describe("ReviewServer HTTP API", () => {
@@ -38,11 +39,11 @@ describe("ReviewServer HTTP API", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ files: [testFile] }),
     }).then((response) => response.json());
-    const before = server.store.sessions.get(created.sessionId)!.lastSeen;
+    const before = server.store.read(created.sessionId)!.lastSeen;
 
     await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}`);
 
-    expect(server.store.sessions.get(created.sessionId)!.lastSeen).toBe(before);
+    expect(server.store.read(created.sessionId)!.lastSeen).toBe(before);
   });
 
   it("creates a session for a document and adds comments", async () => {
@@ -111,8 +112,7 @@ describe("ReviewServer HTTP API", () => {
     expect(ackData.status).toBe("timeout");
   });
 
-  it("restores existing watches and serves a captured page whose source is missing", async () => {
-    const watchersBefore = server.resourceCounts().watchers;
+  it("watches only connected sessions and keeps captured pages with missing sources", async () => {
     const removedFile = path.resolve(__dirname, "removed-after-create.md");
     fs.writeFileSync(removedFile, "# Captured before removal\n", "utf8");
     const created = await fetch(`http://127.0.0.1:${port}/api/session`, {
@@ -125,6 +125,13 @@ describe("ReviewServer HTTP API", () => {
 
     server = new ReviewServer();
     port = await server.start(5891);
+    expect(server.resourceCounts()).toEqual({
+      sessions: 0,
+      watchers: 0,
+      sse: 0,
+      pollers: 0,
+      timers: 0,
+    });
     const session = await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}`).then(
       (response) => response.json()
     );
@@ -135,8 +142,216 @@ describe("ReviewServer HTTP API", () => {
       `http://127.0.0.1:${port}/api/session/${created.sessionId}/page/${removedPageId}`
     ).then((response) => response.json());
 
-    expect(server.resourceCounts().watchers).toBe(watchersBefore);
     expect(removedPage.content).toBe("# Captured before removal\n");
+
+    const abort = new AbortController();
+    const events = await fetch(`http://127.0.0.1:${port}/events?session=${created.sessionId}`, {
+      signal: abort.signal,
+    });
+    const reader = events.body!.getReader();
+    await reader.read();
+    expect(server.resourceCounts()).toEqual({
+      sessions: 1,
+      watchers: 1,
+      sse: 1,
+      pollers: 0,
+      timers: 0,
+    });
+    abort.abort();
+    await Bun.sleep(10);
+    expect(server.resourceCounts()).toEqual({
+      sessions: 0,
+      watchers: 0,
+      sse: 0,
+      pollers: 0,
+      timers: 0,
+    });
+  });
+
+  it("reconciles an inactive source when the next SSE client connects", async () => {
+    const source = path.resolve(__dirname, "changed-while-inactive.md");
+    fs.writeFileSync(source, "# Before\n", "utf8");
+    try {
+      const created = await fetch(`http://127.0.0.1:${port}/api/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: [source] }),
+      }).then((response) => response.json());
+      fs.writeFileSync(source, "# After\n", "utf8");
+
+      const captured = await fetch(
+        `http://127.0.0.1:${port}/api/session/${created.sessionId}/page/${created.activePageId}`
+      ).then((response) => response.json());
+      expect(captured.content).toBe("# Before\n");
+
+      const reconcile = server.store.reconcile.bind(server.store);
+      let watchersDuringReconcile = 0;
+      server.store.reconcile = ((session) => {
+        watchersDuringReconcile = server.resourceCounts().watchers;
+        return reconcile(session);
+      }) as typeof server.store.reconcile;
+      const abort = new AbortController();
+      const events = await fetch(`http://127.0.0.1:${port}/events?session=${created.sessionId}`, {
+        signal: abort.signal,
+      });
+      server.store.reconcile = reconcile;
+      const reader = events.body!.getReader();
+      await reader.read();
+      const reconciled = await fetch(
+        `http://127.0.0.1:${port}/api/session/${created.sessionId}/page/${created.activePageId}`
+      ).then((response) => response.json());
+      expect(reconciled.content).toBe("# After\n");
+      expect(watchersDuringReconcile).toBe(1);
+      abort.abort();
+      await Bun.sleep(10);
+      expect(server.resourceCounts().watchers).toBe(0);
+    } finally {
+      fs.rmSync(source, { force: true });
+    }
+  });
+
+  it("keeps poll-only sessions free of source watches", async () => {
+    const created = await fetch(`http://127.0.0.1:${port}/api/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [testFile] }),
+    }).then((response) => response.json());
+
+    const poll = fetch(
+      `http://127.0.0.1:${port}/api/session/${created.sessionId}/poll?timeout=0.05`
+    );
+    await Bun.sleep(10);
+    expect(server.resourceCounts()).toEqual({
+      sessions: 1,
+      watchers: 0,
+      sse: 0,
+      pollers: 1,
+      timers: 1,
+    });
+    expect((await poll).status).toBe(200);
+    expect(server.resourceCounts()).toEqual({
+      sessions: 0,
+      watchers: 0,
+      sse: 0,
+      pollers: 0,
+      timers: 0,
+    });
+  });
+
+  it("releases a long poll when its client aborts", async () => {
+    const created = await fetch(`http://127.0.0.1:${port}/api/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [testFile] }),
+    }).then((response) => response.json());
+    const abort = new AbortController();
+    const poll = fetch(
+      `http://127.0.0.1:${port}/api/session/${created.sessionId}/poll?timeout=60`,
+      { signal: abort.signal }
+    ).catch(() => undefined);
+
+    await Bun.sleep(10);
+    expect(server.resourceCounts()).toMatchObject({ pollers: 1, timers: 1 });
+    abort.abort();
+    await poll;
+    await Bun.sleep(10);
+    expect(server.resourceCounts()).toEqual({
+      sessions: 0,
+      watchers: 0,
+      sse: 0,
+      pollers: 0,
+      timers: 0,
+    });
+  });
+
+  it("marks restored deletions and changed binary diffs stale on activation", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "piew-live-diff-"));
+    const deleted = path.join(root, "deleted.bin");
+    const binary = path.join(root, "changed.bin");
+    const capturedBinary = Buffer.from([0, 1, 2]);
+    fs.writeFileSync(binary, Buffer.from([0, 1, 3]));
+    try {
+      const deletedSession = server.store.createDiffSession({
+        repoRoot: root,
+        range: "working-tree",
+        staged: false,
+        liveHead: true,
+        files: [{ status: "deleted", oldPath: "deleted.bin", oldContent: "before" }],
+      });
+      const binarySession = server.store.createDiffSession({
+        repoRoot: root,
+        range: "working-tree",
+        staged: false,
+        liveHead: true,
+        files: [
+          {
+            status: "modified",
+            oldPath: "changed.bin",
+            newPath: "changed.bin",
+            newHash: crypto.createHash("sha1").update(capturedBinary).digest("hex"),
+          },
+        ],
+      });
+      expect(
+        server.store.read(binarySession.id)!.pages[binarySession.activePageId].diff!.newHash
+      ).toBeUndefined();
+      fs.writeFileSync(deleted, Buffer.from([3, 4, 5]));
+
+      const activate = async (info: typeof deletedSession) => {
+        const abort = new AbortController();
+        const events = await fetch(`http://127.0.0.1:${port}/events?session=${info.id}`, {
+          signal: abort.signal,
+        });
+        await events.body!.getReader().read();
+        expect(server.store.read(info.id)!.pages[info.activePageId].stale).toBe(true);
+        abort.abort();
+        await Bun.sleep(10);
+      };
+      await Promise.all([activate(deletedSession), activate(binarySession)]);
+
+      const refreshedBytes = Buffer.from([0, 1, 3]);
+      fs.writeFileSync(binary, Buffer.from([0, 1, 4]));
+      server.store.refreshDiff(binarySession.id, binarySession.activePageId, {
+        status: "modified",
+        oldPath: "changed.bin",
+        newPath: "changed.bin",
+        newHash: crypto.createHash("sha1").update(refreshedBytes).digest("hex"),
+      });
+      const refreshed = server.store.read(binarySession.id)!;
+      expect(refreshed.pages[binarySession.activePageId].stale).toBe(false);
+      expect(refreshed.pages[binarySession.activePageId].diff!.newHash).toBeUndefined();
+      server.store.reconcile(refreshed);
+      expect(server.store.read(binarySession.id)!.pages[binarySession.activePageId].stale).toBe(
+        true
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not rewrite a session when Send rejects empty feedback", async () => {
+    const created = await fetch(`http://127.0.0.1:${port}/api/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [testFile] }),
+    }).then((response) => response.json());
+    const record = path.join(
+      process.env.PIEW_DIR!,
+      "state-v4",
+      "sessions",
+      `${created.sessionId}.json`
+    );
+    const before = fs.statSync(record).mtimeMs;
+    await Bun.sleep(10);
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/session/${created.sessionId}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(400);
+    expect(fs.statSync(record).mtimeMs).toBe(before);
   });
 
   it("returns typed errors for missing and corrupt pages", async () => {

@@ -9,11 +9,12 @@ describe("session retention", () => {
     fs.writeFileSync(source, "# Retained\n");
     const store = new Store();
     const created = store.createSession([source]);
-    store.sessions.get(created.id)!.lastSeen = Date.now() - 365 * 24 * 60 * 60 * 1000;
-    store.persist(created.id);
+    store.mutate(created.id, (session) => {
+      session.lastSeen = Date.now() - 365 * 24 * 60 * 60 * 1000;
+    });
 
     const restored = new Store();
 
-    expect(restored.sessions.has(created.id)).toBe(true);
+    expect(restored.has(created.id)).toBe(true);
   });
 });

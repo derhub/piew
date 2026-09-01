@@ -115,7 +115,7 @@ describe("diff annotation anchoring", () => {
   });
 
   it("forces the side on a file that only has an old path", async () => {
-    const deletedKey = server.store.sessions.get(sessionId)!.reviewMap.items[1].pageId;
+    const deletedKey = server.store.read(sessionId)!.reviewMap.items[1].pageId;
     const res = await post(`/api/session/${sessionId}/page/${deletedKey}/comment`, {
       kind: "line_range",
       startLine: 1,
@@ -129,7 +129,7 @@ describe("diff annotation anchoring", () => {
   });
 
   it("refuses an edit on a file that has no post-image path", async () => {
-    const deletedKey = server.store.sessions.get(sessionId)!.reviewMap.items[1].pageId;
+    const deletedKey = server.store.read(sessionId)!.reviewMap.items[1].pageId;
     const res = await post(`/api/session/${sessionId}/page/${deletedKey}/edit`, {
       startLine: 1,
       endLine: 1,

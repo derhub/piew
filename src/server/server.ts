@@ -2,6 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { ReviewMapError, Store } from "./store";
+import { type PollerRecord, SessionRuntime } from "./session-runtime";
 import { FileWatcher } from "./watcher";
 import { readDiffBlobs, type ResolvedDiff } from "../cli/git";
 import { canonicalTarget, ensureStateDir, SERVER_PROTOCOL, serverRecordPath } from "../cli/paths";
@@ -18,11 +19,14 @@ import type {
   FeedbackTurnItem,
   ItemStatus,
   JsonValue,
+  PageData,
   PageFeedback,
   PageMeta,
   ReviewBatch,
   ReviewComment,
   ReviewEdit,
+  ReviewSession,
+  ToolFeedback,
 } from "../lib/types";
 
 const STATUSES = new Set<ItemStatus>(["applied", "skipped", "question"]);
@@ -96,131 +100,56 @@ export const MAX_POLL_SECS = 240;
 
 export class ReviewServer {
   public store = new Store();
-  public watcher: FileWatcher;
+  private watcher: FileWatcher;
+  private runtime: SessionRuntime;
   public token = crypto.randomBytes(16).toString("hex");
   public port = 4173;
-  private sseClients = new Map<string, Set<ReadableStreamDefaultController>>();
-  private pollers = new Map<
-    string,
-    Set<{
-      resolve: (batch: ReviewBatch | null) => void;
-      timer: ReturnType<typeof setTimeout> | null;
-    }>
-  >();
   private serverInstance: any = null;
   private staticDir: string;
 
   constructor(staticDir?: string) {
     this.staticDir = staticDir || path.resolve(__dirname, "../../dist");
     this.watcher = new FileWatcher((file, content, hash) => {
-      for (const [sessionId, session] of this.store.sessions) {
-        for (const page of Object.values(session.pages)) {
-          if (page.file !== file) continue;
-          if (page.kind === "diff") {
-            if (!page.liveHead) continue;
-            page.stale = true;
-            this.store.persist(sessionId);
-            this.emitToSession(sessionId, "stale", { pageId: page.id, file });
-          } else {
-            this.store.reloadPage(sessionId, page, content, hash);
-            this.emitToSession(sessionId, "reload", { pageId: page.id, file });
-          }
+      for (const sessionId of this.runtime.sessionsForSource(file)) {
+        for (const result of this.store.reloadSource(sessionId, file, content, hash)) {
+          this.emitToSession(sessionId, result.event, { pageId: result.pageId, file });
         }
       }
     });
-    for (const session of this.store.sessions.values()) this.watchSessionSources(session);
-  }
-
-  private watchSessionSources(session: {
-    pages: Record<string, { file: string; kind: string; liveHead?: boolean }>;
-  }): void {
-    for (const page of Object.values(session.pages)) {
-      if (page.kind === "diff" && !page.liveHead) continue;
-      if (fs.existsSync(page.file)) this.watcher.watch(page.file);
-    }
-    const referenced = new Set(
-      [...this.store.sessions.values()].flatMap((stored) =>
-        Object.values(stored.pages)
-          .filter((page) => page.kind !== "diff" || page.liveHead)
-          .map((page) => page.file)
-      )
-    );
-    for (const file of this.watcher.paths()) {
-      if (!referenced.has(file)) this.watcher.unwatch(file);
-    }
+    this.runtime = new SessionRuntime(this.watcher);
   }
 
   private emitToSession(sessionId: string, event: string, data: any) {
-    const clients = this.sseClients.get(sessionId);
-    if (clients) {
-      const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-      for (const c of clients) {
-        try {
-          c.enqueue(new TextEncoder().encode(payload));
-        } catch {
-          clients.delete(c);
-        }
-      }
-      if (clients.size === 0) this.sseClients.delete(sessionId);
-    }
-  }
-
-  private releaseSessionResources(sessionId: string) {
-    const clients = this.sseClients.get(sessionId);
-    if (clients) {
-      for (const client of clients) {
-        try {
-          client.close();
-        } catch {}
-      }
-      this.sseClients.delete(sessionId);
-    }
-
-    const pollSet = this.pollers.get(sessionId);
-    if (pollSet) {
-      for (const poller of pollSet) {
-        if (poller.timer) clearTimeout(poller.timer);
-        poller.resolve(null);
-      }
-      this.pollers.delete(sessionId);
-    }
+    this.runtime.emit(sessionId, event, data);
   }
 
   public pruneAllSessions(): { sessions: number; files: number } {
-    for (const sessionId of this.store.sessions.keys()) this.releaseSessionResources(sessionId);
-    this.watcher.closeAll();
-    const result = this.store.pruneAll();
-    return result;
+    this.runtime.releaseAll();
+    return this.store.pruneAll();
   }
 
   public resourceCounts() {
-    let sse = 0;
-    let pollers = 0;
-    let timers = 0;
-    for (const clients of this.sseClients.values()) sse += clients.size;
-    for (const pollSet of this.pollers.values()) {
-      pollers += pollSet.size;
-      for (const poller of pollSet) timers += poller.timer ? 1 : 0;
-    }
+    const runtime = this.runtime.counts();
     return {
-      sessions: this.store.sessions.size,
+      sessions: runtime.sessions,
       watchers: this.watcher.count(),
-      sse,
-      pollers,
-      timers,
+      sse: runtime.sse,
+      pollers: runtime.pollers,
+      timers: runtime.timers,
     };
   }
 
-  public agentState(sessionId: string): "listening" | "working" | "stranded" | "idle" {
-    const pending = this.store.getBatch(sessionId);
+  private agentStateFor(
+    sessionId: string,
+    pending: ReviewSession["pendingBatch"]
+  ): "listening" | "working" | "stranded" | "idle" {
     if (pending && pending.delivered) return "working";
-    const pollSet = this.pollers.get(sessionId);
-    if (pollSet && pollSet.size > 0) return "listening";
+    if (this.runtime.hasPollers(sessionId)) return "listening";
     return pending ? "stranded" : "idle";
   }
 
-  public broadcastAgentState(sessionId: string) {
-    this.emitToSession(sessionId, "agent", { state: this.agentState(sessionId) });
+  private broadcastAgentState(sessionId: string, pending: ReviewSession["pendingBatch"]) {
+    this.emitToSession(sessionId, "agent", { state: this.agentStateFor(sessionId, pending) });
   }
 
   /**
@@ -245,8 +174,7 @@ export class ReviewServer {
     );
   }
 
-  public pageMeta(sessionId: string, pageId: string): PageMeta {
-    const page = this.store.getPage(sessionId, pageId)!;
+  public pageMeta(page: PageData): PageMeta {
     const { content, diff, ...meta } = page;
     return {
       ...meta,
@@ -255,26 +183,23 @@ export class ReviewServer {
   }
 
   /** Freezes what the agent now holds, so the browser cannot edit it out from under it. */
-  private markSent(sessionId: string) {
-    const session = this.store.sessions.get(sessionId);
-    if (!session) return;
+  private markSent(session: ReviewSession) {
     for (const page of Object.values(session.pages)) {
       for (const comment of page.comments) comment.sent = true;
       for (const edit of page.edits) edit.sent = true;
     }
-    this.store.markToolsSent(
-      sessionId,
-      Object.values(session.tools)
-        .filter((tool) => tool.state === "ready")
-        .map((tool) => tool.id)
-    );
+    for (const [id, tool] of Object.entries(session.tools)) {
+      if (tool.state === "ready") session.tools[id] = { ...tool, state: "sent" };
+    }
   }
 
   /** Each Send carries only what the agent has not seen, so a second press never re-delivers. */
   public collectFeedback(sessionId: string): PageFeedback[] {
-    const session = this.store.sessions.get(sessionId);
-    if (!session) return [];
+    const session = this.store.read(sessionId);
+    return session ? this.feedbackFor(session) : [];
+  }
 
+  private feedbackFor(session: ReviewSession): PageFeedback[] {
     const pagesFeedback: PageFeedback[] = [];
     for (const page of Object.values(session.pages)) {
       const pending = page.comments.filter((c) => !c.sent);
@@ -314,10 +239,7 @@ export class ReviewServer {
   }
 
   /** The transcript copy of a Send. Must run before markSent, which erases the pending set. */
-  private pendingTurnItems(sessionId: string): FeedbackTurnItem[] {
-    const session = this.store.sessions.get(sessionId);
-    if (!session) return [];
-
+  private pendingTurnItems(session: ReviewSession): FeedbackTurnItem[] {
     const items: FeedbackTurnItem[] = [];
     for (const [key, page] of Object.entries(session.pages)) {
       for (const c of page.comments) {
@@ -367,19 +289,26 @@ export class ReviewServer {
     return items;
   }
 
-  public deliverBatch(sessionId: string, batch: ReviewBatch): boolean {
-    const pollSet = this.pollers.get(sessionId);
-    if (!pollSet || pollSet.size === 0) return false;
+  private readyTools(session: ReviewSession): ToolFeedback[] {
+    return Object.values(session.tools).flatMap((tool) =>
+      tool.state === "ready"
+        ? [
+            {
+              id: tool.id,
+              tool: tool.tool,
+              result: tool.result,
+              replies: tool.replies,
+              anchor: tool.request.anchor,
+            },
+          ]
+        : []
+    );
+  }
 
-    // Copied: the loop deletes from the set it walks.
-    // oxlint-disable-next-line unicorn/no-useless-spread
-    for (const poller of [...pollSet]) {
-      clearTimeout(poller.timer);
-      pollSet.delete(poller);
-      poller.resolve(batch);
-    }
-    this.pollers.delete(sessionId);
-    return true;
+  public deliverBatch(sessionId: string, batch: ReviewBatch): boolean {
+    const pollers = this.runtime.takePollers(sessionId);
+    for (const poller of pollers) poller.resolve(batch);
+    return pollers.length > 0;
   }
 
   public async start(requestedPort = 4173): Promise<number> {
@@ -445,29 +374,48 @@ export class ReviewServer {
         // SSE stream: /events?session=s_123
         if (route === "/events") {
           const sid = url.searchParams.get("session") || "default";
+          const session = this.store.read(sid);
+          if (!session) {
+            return Response.json(
+              { error: "Session not found" },
+              { status: 404, headers: corsHeaders }
+            );
+          }
           let controllerRef: ReadableStreamDefaultController;
+          let activationFailed = false;
 
           const stream = new ReadableStream({
             start: (controller) => {
               controllerRef = controller;
-              if (!this.sseClients.has(sid)) {
-                this.sseClients.set(sid, new Set());
+              const firstClient = !this.runtime.hasSse(sid);
+              this.runtime.connect(sid, controller, session);
+              let events: ReturnType<Store["reconcile"]> = [];
+              try {
+                if (firstClient) events = this.store.reconcile(session);
+              } catch (error) {
+                activationFailed = true;
+                this.runtime.disconnect(sid, controller);
+                controller.error(error);
+                return;
               }
-              this.sseClients.get(sid)!.add(controller);
-
-              const session = this.store.sessions.get(sid);
-              const state = session ? this.agentState(sid) : "idle";
+              const state = this.agentStateFor(sid, session.pendingBatch);
               const initPayload = `event: agent\ndata: ${JSON.stringify({ state })}\n\n`;
               controller.enqueue(new TextEncoder().encode(initPayload));
-            },
-            cancel: () => {
-              const clients = this.sseClients.get(sid);
-              if (clients) {
-                clients.delete(controllerRef);
-                if (clients.size === 0) this.sseClients.delete(sid);
+              for (const result of events) {
+                this.emitToSession(sid, result.event, { pageId: result.pageId });
               }
             },
+            cancel: () => {
+              this.runtime.disconnect(sid, controllerRef);
+            },
           });
+
+          if (activationFailed) {
+            return Response.json(
+              { error: "Failed to activate session" },
+              { status: 500, headers: corsHeaders }
+            );
+          }
 
           return new Response(stream, {
             headers: {
@@ -509,8 +457,6 @@ export class ReviewServer {
               }
             }
             const sessionInfo = this.store.createDiffSession(captured);
-            const session = this.store.sessions.get(sessionInfo.id)!;
-            this.watchSessionSources(session);
             return Response.json(
               {
                 sessionId: sessionInfo.id,
@@ -547,7 +493,6 @@ export class ReviewServer {
           }
 
           const sessionInfo = this.store.createSession(filePaths);
-          this.watchSessionSources(this.store.sessions.get(sessionInfo.id)!);
           return Response.json(
             {
               sessionId: sessionInfo.id,
@@ -561,20 +506,7 @@ export class ReviewServer {
 
         // GET /api/sessions (what the landing page lists)
         if (route === "/api/sessions" && req.method === "GET") {
-          const sessions = [...this.store.sessions.values()]
-            .sort((a, b) => b.lastSeen - a.lastSeen)
-            .map((session) => ({
-              id: session.id,
-              lastSeen: session.lastSeen,
-              title: session.reviewMap.title,
-              kind: session.pages[session.activePageId]?.kind ?? "markdown",
-              files: session.reviewMap.items
-                .map((item) => session.pages[item.pageId]?.filename)
-                .filter(Boolean),
-            }))
-            .filter((session) => session.files.length > 0);
-
-          return Response.json({ sessions }, { headers: corsHeaders });
+          return Response.json({ sessions: this.store.list() }, { headers: corsHeaders });
         }
 
         if (route === "/api/sessions" && req.method === "DELETE") {
@@ -588,7 +520,7 @@ export class ReviewServer {
         const sessionMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)$/);
         if (sessionMatch && req.method === "GET") {
           const sid = sessionMatch[1];
-          const session = this.store.sessions.get(sid);
+          const session = this.store.read(sid);
           if (!session) {
             return Response.json(
               { error: "Session not found" },
@@ -599,8 +531,8 @@ export class ReviewServer {
           // Metadata only. Content is fetched per page on open, so a 500-file
           // range costs the same first render as a single document.
           const pages: Record<string, PageMeta> = {};
-          for (const pageId of Object.keys(session.pages)) {
-            pages[pageId] = this.pageMeta(sid, pageId);
+          for (const [pageId, page] of Object.entries(session.pages)) {
+            pages[pageId] = this.pageMeta(page);
           }
 
           return Response.json(
@@ -611,7 +543,7 @@ export class ReviewServer {
               pages,
               turns: session.turns,
               tools: session.tools,
-              agentState: this.agentState(sid),
+              agentState: this.agentStateFor(sid, session.pendingBatch),
             },
             { headers: corsHeaders }
           );
@@ -620,26 +552,13 @@ export class ReviewServer {
         const mapMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/map$/);
         if (mapMatch && req.method === "PUT") {
           try {
-            const info = this.store.replaceReviewMap(mapMatch[1], await req.json());
-            const session = this.store.sessions.get(info.id)!;
-            const reloadedPageIds: string[] = [];
-            for (const page of Object.values(session.pages)) {
-              if (page.kind === "diff") continue;
-              try {
-                const content = fs.readFileSync(page.file, "utf8");
-                const hash = this.watcher.hash(content);
-                if (hash === page.hash) continue;
-                this.store.reloadPage(info.id, page, content, hash);
-                this.watcher.setLastHash(page.file, hash);
-                reloadedPageIds.push(page.id);
-              } catch {
-                // Keep the captured page when its source is temporarily unavailable.
-              }
-            }
-            this.watchSessionSources(session);
+            const input = await req.json();
+            const active = this.runtime.hasSse(mapMatch[1]);
+            const { info, session, events } = this.store.replaceReviewMap(mapMatch[1], input);
+            if (active) this.runtime.refreshSources(info.id, session);
             this.emitToSession(info.id, "refresh", { reviewMap: info.reviewMap });
-            for (const pageId of reloadedPageIds) {
-              this.emitToSession(info.id, "reload", { pageId });
+            for (const result of events) {
+              this.emitToSession(info.id, result.event, { pageId: result.pageId });
             }
             return Response.json(
               { reviewMap: info.reviewMap, activePageId: info.activePageId },
@@ -653,8 +572,8 @@ export class ReviewServer {
               );
             }
             return Response.json(
-              { error: "Invalid Review Map" },
-              { status: 400, headers: corsHeaders }
+              { error: "Failed to save Review Map" },
+              { status: 500, headers: corsHeaders }
             );
           }
         }
@@ -774,11 +693,7 @@ export class ReviewServer {
             );
           }
 
-          page.comments = [];
-          page.edits = [];
-          page.diff = diff;
-          page.stale = false;
-          this.store.persist(sid);
+          this.store.refreshDiff(sid, pageId, diff);
           this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ ok: true }, { headers: corsHeaders });
         }
@@ -968,7 +883,7 @@ export class ReviewServer {
         );
         if (toolArtifactMatch && req.method === "GET") {
           const [, sessionId, interactionId, requested = "index.html"] = toolArtifactMatch;
-          const interaction = this.store.sessions.get(sessionId)?.tools[interactionId];
+          const interaction = this.store.read(sessionId)?.tools[interactionId];
           if (!interaction) {
             return Response.json(
               { error: "Tool interaction not found" },
@@ -997,7 +912,7 @@ export class ReviewServer {
         );
         if (toolInvokeMatch && req.method === "POST") {
           const [, sessionId, toolName] = toolInvokeMatch;
-          const session = this.store.sessions.get(sessionId);
+          const session = this.store.read(sessionId);
           if (!session) {
             return Response.json(
               { error: "Session not found" },
@@ -1115,7 +1030,7 @@ export class ReviewServer {
         );
         if (toolActionMatch && req.method === "POST") {
           const [, sessionId, interactionId] = toolActionMatch;
-          const session = this.store.sessions.get(sessionId);
+          const session = this.store.read(sessionId);
           if (!session) {
             return Response.json(
               { error: "Session not found" },
@@ -1179,64 +1094,76 @@ export class ReviewServer {
             overallNote?: string;
           };
           const sessionId = sendMatch[1];
-          const session = this.store.sessions.get(sessionId);
-          if (!session) {
+          let result:
+            | { status: "pending" | "empty" }
+            | {
+                status: "sent";
+                batch: ReviewBatch;
+                delivered: boolean;
+                pending: ReviewSession["pendingBatch"];
+              }
+            | undefined;
+          try {
+            result = this.store.mutate(
+              sessionId,
+              (stored) => {
+                if (stored.pendingBatch) return { status: "pending" as const };
+                const pages = this.feedbackFor(stored);
+                const tools = this.readyTools(stored);
+                if (!pages.length && !tools.length && !body.overallNote?.trim()) {
+                  return { status: "empty" as const };
+                }
+                const batch: ReviewBatch = {
+                  status: "feedback",
+                  pages,
+                  ...(tools.length ? { tools } : {}),
+                  overall_note: body.overallNote?.trim() || "",
+                  sent_at: new Date().toISOString(),
+                  next_step:
+                    "Apply this feedback to the respective files. When done, run poll --ack to clear.",
+                };
+                const turnItems = this.pendingTurnItems(stored);
+                const delivered = this.runtime.hasPollers(sessionId);
+                this.markSent(stored);
+                stored.pendingBatch = { batch, delivered };
+                stored.turns.push({
+                  id: `t_${crypto.randomBytes(6).toString("hex")}`,
+                  sentAt: batch.sent_at,
+                  note: batch.overall_note || "",
+                  delivered,
+                  items: turnItems,
+                });
+                return { status: "sent" as const, batch, delivered, pending: stored.pendingBatch };
+              },
+              (mutation) => mutation.status === "sent"
+            );
+          } catch {
+            return Response.json(
+              { error: "Failed to save feedback" },
+              { status: 500, headers: corsHeaders }
+            );
+          }
+          if (!result) {
             return Response.json(
               { error: "Session not found" },
               { status: 404, headers: corsHeaders }
             );
           }
-
-          if (session.pendingBatch) {
+          if (result.status === "pending") {
             return Response.json(
               { error: "A feedback batch is still awaiting acknowledgement" },
               { status: 409, headers: corsHeaders }
             );
           }
-
-          const pagesFeedback = this.collectFeedback(sessionId);
-          const toolsFeedback = this.store.readyTools(sessionId);
-          if (
-            pagesFeedback.length === 0 &&
-            toolsFeedback.length === 0 &&
-            !body.overallNote?.trim()
-          ) {
+          if (result.status === "empty") {
             return Response.json(
               { error: "No feedback or note to send" },
               { status: 400, headers: corsHeaders }
             );
           }
-
-          const batch: ReviewBatch = {
-            status: "feedback",
-            pages: pagesFeedback,
-            ...(toolsFeedback.length ? { tools: toolsFeedback } : {}),
-            overall_note: body.overallNote?.trim() || "",
-            sent_at: new Date().toISOString(),
-            next_step:
-              "Apply this feedback to the respective files. When done, run poll --ack to clear.",
-          };
-
-          const turnItems = this.pendingTurnItems(sessionId);
-          this.markSent(sessionId);
-          this.store.setBatch(sessionId, batch);
-          const delivered = this.deliverBatch(sessionId, batch);
-          if (delivered) {
-            const entry = this.store.getBatch(sessionId);
-            if (entry) entry.delivered = true;
-          }
-
-          session.turns.push({
-            id: `t_${crypto.randomBytes(6).toString("hex")}`,
-            sentAt: batch.sent_at,
-            note: batch.overall_note || "",
-            delivered,
-            items: turnItems,
-          });
-
-          this.store.persist(sessionId);
-          this.broadcastAgentState(sessionId);
-          return Response.json({ ok: true, delivered }, { headers: corsHeaders });
+          if (result.delivered) this.deliverBatch(sessionId, result.batch);
+          this.broadcastAgentState(sessionId, result.pending);
+          return Response.json({ ok: true, delivered: result.delivered }, { headers: corsHeaders });
         }
 
         const respondMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/respond$/);
@@ -1246,78 +1173,109 @@ export class ReviewServer {
             items?: Array<{ id: string; status: ItemStatus; note?: string }>;
           };
           const sessionId = respondMatch[1];
-          const session = this.store.sessions.get(sessionId);
-          if (!session) {
+          const result = this.store.mutate(sessionId, (stored) => {
+            const unknown: string[] = [];
+            const items: FeedbackTurnItem[] = [];
+            const pageIds = new Set<string>();
+            let toolChanged = false;
+            for (const entry of body.items ?? []) {
+              if (!entry?.id || !STATUSES.has(entry.status)) {
+                unknown.push(entry?.id ?? "");
+                continue;
+              }
+
+              let annotationFound = false;
+              for (const page of Object.values(stored.pages)) {
+                const item =
+                  page.comments.find((comment) => comment.id === entry.id) ??
+                  page.edits.find((edit) => edit.id === entry.id);
+                if (!item?.sent) continue;
+                item.status = entry.status;
+                if (entry.note?.trim()) {
+                  item.replies = [
+                    ...(item.replies ?? []),
+                    { from: "agent", text: entry.note.trim(), at: Date.now() },
+                  ];
+                }
+                items.push({
+                  id: item.id,
+                  kind: "suggestedText" in item ? "edit" : "comment",
+                  status: entry.status,
+                  pageId: page.id,
+                  filename: page.filename,
+                  file: item.file,
+                  startLine: item.startLine,
+                  endLine: item.endLine,
+                  feedback: entry.note,
+                  orphaned: item.orphaned,
+                });
+                pageIds.add(page.id);
+                annotationFound = true;
+                break;
+              }
+              if (annotationFound) continue;
+
+              const tool = stored.tools[entry.id];
+              if (tool?.state !== "sent" || entry.status === "open") {
+                unknown.push(entry.id);
+                continue;
+              }
+              const replies = entry.note?.trim()
+                ? [
+                    ...tool.replies,
+                    { from: "agent" as const, text: entry.note.trim(), at: Date.now() },
+                  ]
+                : tool.replies;
+              const next =
+                entry.status === "question"
+                  ? { ...tool, state: "awaiting-answer" as const, replies }
+                  : { ...tool, state: "resolved" as const, status: entry.status, replies };
+              stored.tools[entry.id] = next;
+              items.push({
+                id: next.id,
+                kind: "tool",
+                status: entry.status,
+                tool: next.tool,
+                result: next.result,
+                replies: next.replies,
+                anchor: next.request.anchor,
+              });
+              toolChanged = true;
+            }
+
+            if (items.length || body.note?.trim()) {
+              stored.turns.push({
+                id: `t_${crypto.randomBytes(6).toString("hex")}`,
+                from: "agent",
+                sentAt: new Date().toISOString(),
+                note: body.note?.trim() || "",
+                delivered: true,
+                items,
+              });
+            }
+            return { unknown, pageIds: [...pageIds], toolChanged, changed: !!items.length };
+          });
+
+          if (!result) {
             return Response.json(
               { error: "Session not found" },
               { status: 404, headers: corsHeaders }
             );
           }
-
-          const unknown: string[] = [];
-          const items: FeedbackTurnItem[] = [];
-          for (const entry of body.items ?? []) {
-            if (!entry?.id || !STATUSES.has(entry.status)) {
-              unknown.push(entry?.id ?? "");
-              continue;
-            }
-            const hit = this.store.setItemStatus(sessionId, entry.id, entry.status, entry.note);
-            if (hit) {
-              const { page, item } = hit;
-              items.push({
-                id: item.id,
-                kind: "suggestedText" in item ? "edit" : "comment",
-                status: entry.status,
-                pageId: page.id,
-                filename: page.filename,
-                file: item.file,
-                startLine: item.startLine,
-                endLine: item.endLine,
-                feedback: entry.note,
-                orphaned: item.orphaned,
-              });
-              this.emitToSession(sessionId, "refresh", { pageId: page.id });
-              continue;
-            }
-
-            const tool = this.store.setToolStatus(sessionId, entry.id, entry.status, entry.note);
-            if (!tool || tool.state === "open") {
-              unknown.push(entry.id);
-              continue;
-            }
-            items.push({
-              id: tool.id,
-              kind: "tool",
-              status: entry.status,
-              tool: tool.tool,
-              result: tool.result,
-              replies: tool.replies,
-              anchor: tool.request.anchor,
-            });
+          for (const pageId of result.pageIds) {
+            this.emitToSession(sessionId, "refresh", { pageId });
+          }
+          if (result.toolChanged || result.changed || body.note?.trim()) {
             this.emitToSession(sessionId, "refresh", {});
           }
-
-          if (items.length || body.note?.trim()) {
-            const turn = {
-              id: `t_${crypto.randomBytes(6).toString("hex")}`,
-              from: "agent" as const,
-              sentAt: new Date().toISOString(),
-              note: body.note?.trim() || "",
-              delivered: true,
-              items,
-            };
-            session.turns.push(turn);
-            this.store.persist(sessionId);
-            this.emitToSession(sessionId, "refresh", {});
-          }
-
-          return Response.json({ ok: true, unknown }, { headers: corsHeaders });
+          return Response.json({ ok: true, unknown: result.unknown }, { headers: corsHeaders });
         }
 
         const pollMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/poll$/);
         if (pollMatch && req.method === "GET") {
           const sessionId = pollMatch[1];
-          if (!this.store.sessions.has(sessionId)) {
+          const stored = this.store.read(sessionId);
+          if (!stored) {
             return Response.json(
               { error: "Session not found" },
               { status: 404, headers: corsHeaders }
@@ -1326,28 +1284,48 @@ export class ReviewServer {
           const ack = url.searchParams.get("ack") === "1";
           const timeoutSecs = Number(url.searchParams.get("timeout")) || 0;
 
-          const pending = this.store.getBatch(sessionId);
+          let pending = stored.pendingBatch;
 
           // ack clears the batch the caller already handled. A batch that was never
           // delivered is not that batch: hand it over instead of destroying it.
           if (ack && pending?.delivered) {
-            this.store.clearBatch(sessionId);
-            this.store.clearSentFeedback(sessionId);
+            this.store.mutate(sessionId, (session) => {
+              delete session.pendingBatch;
+              for (const page of Object.values(session.pages)) {
+                page.comments = [];
+                page.edits = [];
+              }
+            });
             this.emitToSession(sessionId, "refresh", {});
-            this.broadcastAgentState(sessionId);
+            this.broadcastAgentState(sessionId, undefined);
+            pending = undefined;
           } else if (ack && !pending) {
-            this.store.clearSentFeedback(sessionId);
+            this.store.mutate(sessionId, (session) => {
+              for (const page of Object.values(session.pages)) {
+                page.comments = [];
+                page.edits = [];
+              }
+            });
             this.emitToSession(sessionId, "refresh", {});
-            this.broadcastAgentState(sessionId);
+            this.broadcastAgentState(sessionId, undefined);
           }
 
           // Re-serve an unacked batch as often as asked: a poll whose response was lost
           // must be able to fetch it again.
-          const undelivered = this.store.getBatch(sessionId);
-          if (undelivered) {
-            undelivered.delivered = true;
-            this.broadcastAgentState(sessionId);
-            return Response.json(undelivered.batch, { headers: corsHeaders });
+          if (pending) {
+            const batch = this.store.mutate(sessionId, (session) => {
+              if (!session.pendingBatch) return null;
+              session.pendingBatch.delivered = true;
+              return session.pendingBatch.batch;
+            });
+            if (!batch) {
+              return Response.json(
+                { error: "Session not found" },
+                { status: 404, headers: corsHeaders }
+              );
+            }
+            this.broadcastAgentState(sessionId, { batch, delivered: true });
+            return Response.json(batch, { headers: corsHeaders });
           }
 
           // Long poll. Capped under Bun's idleTimeout so the wait always ends in a
@@ -1355,13 +1333,18 @@ export class ReviewServer {
           const waitSecs = timeoutSecs > 0 ? Math.min(timeoutSecs, MAX_POLL_SECS) : 0;
 
           return new Promise<Response>((resolve) => {
-            if (!this.pollers.has(sessionId)) {
-              this.pollers.set(sessionId, new Set());
-            }
-
-            let timer: ReturnType<typeof setTimeout> | null = null;
-            const pollerRecord = {
+            let settled = false;
+            const onAbort = () => {
+              if (settled) return;
+              this.runtime.removePoller(sessionId, pollerRecord);
+              pollerRecord.resolve(null);
+              this.broadcastAgentState(sessionId, undefined);
+            };
+            const pollerRecord: PollerRecord = {
               resolve: (batch: ReviewBatch | null) => {
+                if (settled) return;
+                settled = true;
+                req.signal.removeEventListener("abort", onAbort);
                 if (batch) {
                   resolve(Response.json(batch, { headers: corsHeaders }));
                 } else {
@@ -1381,35 +1364,32 @@ export class ReviewServer {
             };
 
             if (waitSecs > 0) {
-              timer = setTimeout(() => {
-                const pollSet = this.pollers.get(sessionId);
-                if (pollSet) {
-                  pollSet.delete(pollerRecord);
-                  if (pollSet.size === 0) this.pollers.delete(sessionId);
-                }
+              pollerRecord.timer = setTimeout(() => {
+                this.runtime.removePoller(sessionId, pollerRecord);
                 pollerRecord.resolve(null);
-                this.broadcastAgentState(sessionId);
+                this.broadcastAgentState(sessionId, undefined);
               }, waitSecs * 1000);
-              pollerRecord.timer = timer;
             }
 
-            this.pollers.get(sessionId)!.add(pollerRecord);
-            this.broadcastAgentState(sessionId);
+            this.runtime.addPoller(sessionId, pollerRecord);
+            req.signal.addEventListener("abort", onAbort, { once: true });
+            if (req.signal.aborted) onAbort();
+            else this.broadcastAgentState(sessionId, undefined);
           });
         }
 
         const statusMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/status$/);
         if (statusMatch && req.method === "GET") {
           const sessionId = statusMatch[1];
-          const session = this.store.sessions.get(sessionId);
+          const session = this.store.read(sessionId);
           if (!session) {
             return Response.json(
               { error: "Session not found" },
               { status: 404, headers: corsHeaders }
             );
           }
-          const pending = this.store.getBatch(sessionId);
-          const listening = (this.pollers.get(sessionId) || new Set()).size > 0;
+          const pending = session.pendingBatch;
+          const listening = this.runtime.hasPollers(sessionId);
 
           let unsentComments = 0;
           let unsentEdits = 0;
@@ -1471,10 +1451,7 @@ export class ReviewServer {
   }
 
   public stop() {
-    for (const sessionId of new Set([...this.sseClients.keys(), ...this.pollers.keys()])) {
-      this.releaseSessionResources(sessionId);
-    }
-    this.watcher.closeAll();
+    this.runtime.releaseAll();
     if (this.serverInstance) {
       this.serverInstance.stop();
       this.serverInstance = null;
