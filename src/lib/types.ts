@@ -12,6 +12,8 @@ export interface DiffFile {
   // Absent for a side that does not exist, and for binary blobs.
   oldContent?: string;
   newContent?: string;
+  /** Digest of the captured new-side bytes, including binary blobs. */
+  newHash?: string;
   status: DiffStatus;
 }
 

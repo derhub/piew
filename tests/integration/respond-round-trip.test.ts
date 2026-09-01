@@ -50,6 +50,13 @@ describe("Respond round trip", () => {
 
   const sessionState = (id: string) => api(`/api/session/${id}`).then((r) => r.json());
 
+  async function connect(sessionId: string) {
+    const abort = new AbortController();
+    const response = await api(`/events?session=${sessionId}`, { signal: abort.signal });
+    await response.body!.getReader().read();
+    return abort;
+  }
+
   async function waitForComment(sessionId: string, pageId: string, commentId: string) {
     const deadline = Date.now() + 2_000;
     while (Date.now() < deadline) {
@@ -148,26 +155,30 @@ describe("Respond round trip", () => {
       method: "POST",
       body: JSON.stringify({}),
     });
+    const abort = await connect(session.sessionId);
+    try {
+      fs.writeFileSync(file, "# Doc\n\nNew line.\n\nContent.\n\nMore.", "utf8");
+      await waitForComment(session.sessionId, pageId, comment.id);
+      await api(`/api/session/${session.sessionId}/respond`, {
+        method: "POST",
+        body: JSON.stringify({
+          items: [{ id: comment.id, status: "applied", note: "moved it" }],
+        }),
+      });
 
-    fs.writeFileSync(file, "# Doc\n\nNew line.\n\nContent.\n\nMore.", "utf8");
-    await waitForComment(session.sessionId, pageId, comment.id);
-    await api(`/api/session/${session.sessionId}/respond`, {
-      method: "POST",
-      body: JSON.stringify({
-        items: [{ id: comment.id, status: "applied", note: "moved it" }],
-      }),
-    });
-
-    const state = await sessionState(session.sessionId);
-    expect({
-      comment: state.pages[pageId].comments.find((item: any) => item.id === comment.id),
-      userTurn: state.turns.at(-2).items[0],
-      agentTurn: state.turns.at(-1).items[0],
-    }).toMatchObject({
-      comment: { startLine: 5, endLine: 5, orphaned: false },
-      userTurn: { startLine: 5, endLine: 5, orphaned: false },
-      agentTurn: { startLine: 5, endLine: 5, orphaned: false },
-    });
+      const state = await sessionState(session.sessionId);
+      expect({
+        comment: state.pages[pageId].comments.find((item: any) => item.id === comment.id),
+        userTurn: state.turns.at(-2).items[0],
+        agentTurn: state.turns.at(-1).items[0],
+      }).toMatchObject({
+        comment: { startLine: 5, endLine: 5, orphaned: false },
+        userTurn: { startLine: 5, endLine: 5, orphaned: false },
+        agentTurn: { startLine: 5, endLine: 5, orphaned: false },
+      });
+    } finally {
+      abort.abort();
+    }
   });
 
   it("marks a line comment unplaced when its quote disappears", async () => {
@@ -186,25 +197,29 @@ describe("Respond round trip", () => {
       method: "POST",
       body: JSON.stringify({}),
     });
+    const abort = await connect(session.sessionId);
+    try {
+      fs.writeFileSync(file, "# Doc\n\nReplacement.\n\nMore.", "utf8");
+      await waitForComment(session.sessionId, pageId, comment.id);
+      await api(`/api/session/${session.sessionId}/respond`, {
+        method: "POST",
+        body: JSON.stringify({
+          items: [{ id: comment.id, status: "applied", note: "replaced it" }],
+        }),
+      });
 
-    fs.writeFileSync(file, "# Doc\n\nReplacement.\n\nMore.", "utf8");
-    await waitForComment(session.sessionId, pageId, comment.id);
-    await api(`/api/session/${session.sessionId}/respond`, {
-      method: "POST",
-      body: JSON.stringify({
-        items: [{ id: comment.id, status: "applied", note: "replaced it" }],
-      }),
-    });
-
-    const state = await sessionState(session.sessionId);
-    expect({
-      comment: state.pages[pageId].comments.find((item: any) => item.id === comment.id),
-      userTurn: state.turns.at(-2).items[0],
-      agentTurn: state.turns.at(-1).items[0],
-    }).toMatchObject({
-      comment: { startLine: 3, endLine: 3, orphaned: true },
-      userTurn: { startLine: 3, endLine: 3, orphaned: true },
-      agentTurn: { startLine: 3, endLine: 3, orphaned: true },
-    });
+      const state = await sessionState(session.sessionId);
+      expect({
+        comment: state.pages[pageId].comments.find((item: any) => item.id === comment.id),
+        userTurn: state.turns.at(-2).items[0],
+        agentTurn: state.turns.at(-1).items[0],
+      }).toMatchObject({
+        comment: { startLine: 3, endLine: 3, orphaned: true },
+        userTurn: { startLine: 3, endLine: 3, orphaned: true },
+        agentTurn: { startLine: 3, endLine: 3, orphaned: true },
+      });
+    } finally {
+      abort.abort();
+    }
   });
 });

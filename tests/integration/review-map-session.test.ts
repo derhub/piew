@@ -80,10 +80,10 @@ describe("Review Map sessions", () => {
     );
 
     const current = await (await request(`/api/session/${sessionId}`)).json();
-    const persist = server.store.persist.bind(server.store);
-    server.store.persist = () => {
+    const mutate = server.store.mutate.bind(server.store);
+    server.store.mutate = (() => {
       throw new Error("disk unavailable");
-    };
+    }) as typeof server.store.mutate;
     const persistenceFailure = await request(`/api/session/${sessionId}/map`, "PUT", {
       title: "Must roll back",
       items: current.reviewMap.items.map((item: { pageId: string; path: string }) => ({
@@ -91,11 +91,38 @@ describe("Review Map sessions", () => {
         source: { kind: "page", pageId: item.pageId },
       })),
     });
-    server.store.persist = persist;
-    expect(persistenceFailure.status).toBe(400);
+    server.store.mutate = mutate;
+    expect(persistenceFailure.status).toBe(500);
     expect(JSON.stringify(await (await request(`/api/session/${sessionId}`)).json())).toBe(
       snapshot
     );
+  });
+
+  it("commits an active map and reconciliation in one store write", async () => {
+    const session = await (await request(`/api/session/${sessionId}`)).json();
+    const abort = new AbortController();
+    const events = await fetch(`http://127.0.0.1:${port}/events?session=${sessionId}`, {
+      signal: abort.signal,
+    });
+    await events.body!.getReader().read();
+    const reconcile = server.store.reconcile;
+    server.store.reconcile = (() => {
+      throw new Error("second save must not run");
+    }) as typeof server.store.reconcile;
+    try {
+      const replaced = await request(`/api/session/${sessionId}/map`, "PUT", {
+        title: session.reviewMap.title,
+        items: session.reviewMap.items.map((item: { path: string; pageId: string }) => ({
+          path: item.path,
+          source: { kind: "page", pageId: item.pageId },
+        })),
+      });
+      expect(replaced.status).toBe(200);
+    } finally {
+      server.store.reconcile = reconcile;
+      abort.abort();
+      await Bun.sleep(10);
+    }
   });
 
   it("blocks removal of a page with unresolved feedback", async () => {
@@ -123,30 +150,41 @@ describe("Review Map sessions", () => {
 
   it("releases watches for pages removed from the map", async () => {
     const session = await (await request(`/api/session/${sessionId}`)).json();
+    const abort = new AbortController();
+    const events = await fetch(`http://127.0.0.1:${port}/events?session=${sessionId}`, {
+      signal: abort.signal,
+    });
+    const reader = events.body!.getReader();
+    await reader.read();
     const extra = path.join(root, "extra.ts");
-    fs.writeFileSync(extra, "export const extra = true;\n");
-    const added = await request(`/api/session/${sessionId}/map`, "PUT", {
-      title: session.reviewMap.title,
-      items: [
-        ...session.reviewMap.items.map((item: { path: string; pageId: string }) => ({
+    try {
+      fs.writeFileSync(extra, "export const extra = true;\n");
+      const added = await request(`/api/session/${sessionId}/map`, "PUT", {
+        title: session.reviewMap.title,
+        items: [
+          ...session.reviewMap.items.map((item: { path: string; pageId: string }) => ({
+            path: item.path,
+            source: { kind: "page", pageId: item.pageId },
+          })),
+          { path: "Extra/File", source: { kind: "file", file: extra } },
+        ],
+      });
+      expect(added.status).toBe(200);
+      const watchersWithExtraPage = server.resourceCounts().watchers;
+
+      const removed = await request(`/api/session/${sessionId}/map`, "PUT", {
+        title: session.reviewMap.title,
+        items: session.reviewMap.items.map((item: { path: string; pageId: string }) => ({
           path: item.path,
           source: { kind: "page", pageId: item.pageId },
         })),
-        { path: "Extra/File", source: { kind: "file", file: extra } },
-      ],
-    });
-    expect(added.status).toBe(200);
-    const watchersWithExtraPage = server.resourceCounts().watchers;
-
-    const removed = await request(`/api/session/${sessionId}/map`, "PUT", {
-      title: session.reviewMap.title,
-      items: session.reviewMap.items.map((item: { path: string; pageId: string }) => ({
-        path: item.path,
-        source: { kind: "page", pageId: item.pageId },
-      })),
-    });
-    expect(removed.status).toBe(200);
-    expect(server.resourceCounts().watchers).toBe(watchersWithExtraPage - 1);
+      });
+      expect(removed.status).toBe(200);
+      expect(server.resourceCounts().watchers).toBe(watchersWithExtraPage - 1);
+    } finally {
+      abort.abort();
+      await Bun.sleep(10);
+    }
   });
 
   it("isolates the same file and its feedback between sessions", async () => {
@@ -166,7 +204,7 @@ describe("Review Map sessions", () => {
 
   it("restores session-owned pages and feedback from schema v4", async () => {
     const restarted = new ReviewServer();
-    const session = restarted.store.sessions.get(sessionId);
+    const session = restarted.store.read(sessionId);
     expect(session?.reviewMap.title).toBe("Release review");
     expect(Object.values(session?.pages ?? {}).some((page) => page.comments.length > 0)).toBe(true);
     expect(

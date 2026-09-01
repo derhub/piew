@@ -80,7 +80,7 @@ describe("session storage", () => {
     expect(result.secondUnchanged).toBe(true);
   });
 
-  it("loads valid v4 sessions without importing legacy or malformed state", async () => {
+  it("loads sessions on demand and isolates malformed siblings during listing", async () => {
     const source = path.join(root, "valid.md");
     fs.writeFileSync(source, "# Valid\n");
     const result = await runIsolated(`
@@ -111,15 +111,23 @@ describe("session storage", () => {
       }));
       fs.writeFileSync(path.join(process.env.PIEW_DIR, "state-v3.json"), JSON.stringify({ sessions: { s_old: { id: "s_old" } } }));
       const restored = new Store();
+      const beforeList = {
+        retainedSessions: Object.hasOwn(restored, "sessions"),
+        quarantined: fs.readdirSync(path.join(process.env.PIEW_DIR, "state-v4", "quarantine")).length,
+      };
+      const loaded = restored.read(created.id);
+      const listed = restored.list();
       console.log(JSON.stringify({
-        ids: [...restored.sessions.keys()],
+        beforeList,
+        ids: listed.map((session) => session.id),
         createdId: created.id,
-        tools: restored.sessions.get(created.id).tools,
+        tools: loaded.tools,
         legacyExists: fs.existsSync(path.join(sessionsDir, "s_legacy.json")),
         quarantined: fs.readdirSync(path.join(process.env.PIEW_DIR, "state-v4", "quarantine")).length,
       }));
     `);
 
+    expect(result.beforeList).toEqual({ retainedSessions: false, quarantined: 0 });
     expect(result.ids).toEqual([result.createdId]);
     expect(result.tools).toEqual({});
     expect(result.legacyExists).toBe(true);
@@ -155,10 +163,11 @@ describe("session storage", () => {
       fs.writeFileSync(brokenRecord, JSON.stringify(invalid));
 
       const restored = new Store();
+      restored.list();
       const keptId = "ti_" + kept.id.slice(2);
       console.log(JSON.stringify({
         kept: fs.existsSync(tools.toolArtifactDir(kept.id, keptId)),
-        keptTools: Object.keys(restored.sessions.get(kept.id).tools),
+        keptTools: Object.keys(restored.read(kept.id).tools),
         removed: fs.existsSync(tools.toolArtifactDir(removed.id, "ti_" + removed.id.slice(2))),
         broken: fs.existsSync(tools.toolArtifactDir(broken.id, "ti_" + broken.id.slice(2))),
         orphan: fs.existsSync(tools.toolArtifactDir("s_orphan", "ti_orphan")),
@@ -170,6 +179,41 @@ describe("session storage", () => {
     expect(result.removed).toBe(false);
     expect(result.broken).toBe(false);
     expect(result.orphan).toBe(false);
+  });
+
+  it("starts with zero live sessions and watches regardless of stored history", async () => {
+    const source = path.join(root, "history.md");
+    fs.writeFileSync(source, "# History\n");
+
+    const result = await runIsolated(`
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const { Store } = await import(${JSON.stringify(STORE_MODULE)});
+      const { ReviewServer } = await import(${JSON.stringify(pathToFileURL(path.resolve(__dirname, "../../src/server/server.ts")).href)});
+      const store = new Store();
+      for (let index = 0; index < 100; index++) store.createSession([${JSON.stringify(source)}]);
+      const sessionsDir = path.join(process.env.PIEW_DIR, "state-v4", "sessions");
+      fs.writeFileSync(path.join(sessionsDir, "s_broken.json"), "{broken");
+
+      const server = new ReviewServer();
+      const beforeList = {
+        resources: server.resourceCounts(),
+        quarantined: fs.readdirSync(path.join(process.env.PIEW_DIR, "state-v4", "quarantine")).length,
+      };
+      const listed = server.store.list();
+      const afterList = {
+        count: listed.length,
+        quarantined: fs.readdirSync(path.join(process.env.PIEW_DIR, "state-v4", "quarantine")).length,
+      };
+      server.stop();
+      console.log(JSON.stringify({ beforeList, afterList }));
+    `);
+
+    expect(result.beforeList).toEqual({
+      resources: { sessions: 0, watchers: 0, sse: 0, pollers: 0, timers: 0 },
+      quarantined: 0,
+    });
+    expect(result.afterList).toEqual({ count: 100, quarantined: 1 });
   });
 
   it("prunes every stored session without deleting reviewed sources", async () => {

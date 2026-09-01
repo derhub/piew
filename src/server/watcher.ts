@@ -17,25 +17,17 @@ export class FileWatcher {
     this.onReload = onReload;
   }
 
-  public hash(text: string): string {
+  private hash(text: string): string {
     return crypto.createHash("sha1").update(text).digest("hex");
-  }
-
-  public setLastHash(file: string, hash: string) {
-    this.hashes.set(file, hash);
   }
 
   public count() {
     return this.watched.size;
   }
 
-  public paths() {
-    return this.watched.keys();
-  }
-
-  public watch(file: string) {
-    if (this.watched.has(file)) return;
-    if (!fs.existsSync(file)) return;
+  public watch(file: string): boolean {
+    if (this.watched.has(file)) return true;
+    if (!fs.existsSync(file)) return false;
 
     try {
       const initial = fs.readFileSync(file, "utf8");
@@ -54,8 +46,8 @@ export class FileWatcher {
             const newHash = this.hash(current);
             if (this.hashes.get(file) === newHash) return;
 
-            this.hashes.set(file, newHash);
             this.onReload(file, current, newHash);
+            this.hashes.set(file, newHash);
           } catch {
             // Ignore temporary read lock during save
           }
@@ -63,8 +55,10 @@ export class FileWatcher {
       });
 
       this.watched.set(file, { watcher, timer: null });
+      return true;
     } catch {
       // Ignore initial watch errors
+      return false;
     }
   }
 
@@ -75,12 +69,6 @@ export class FileWatcher {
       entry.watcher.close();
       this.watched.delete(file);
       this.hashes.delete(file);
-    }
-  }
-
-  public closeAll() {
-    for (const file of this.watched.keys()) {
-      this.unwatch(file);
     }
   }
 }

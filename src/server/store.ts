@@ -3,21 +3,27 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type { ResolvedDiff } from "../cli/git";
 import type {
-  ItemStatus,
   JsonValue,
+  DiffFile,
   PageData,
   PageKind,
   ReplaceReviewMapRequest,
-  ReviewBatch,
   ReviewComment,
   ReviewEdit,
   ReviewMap,
   ReviewSession,
   SessionInfo,
-  ToolFeedback,
   ToolInteraction,
 } from "../lib/types";
-import { deleteSession, loadSessions, pruneSessionFiles, saveSession } from "./session-files";
+import {
+  countSessions,
+  deleteSession,
+  listSessionSummaries,
+  pruneSessionFiles,
+  readSession,
+  saveSession,
+  type SessionSummary,
+} from "./session-files";
 
 export type { ResolvedDiff, DiffSource } from "../cli/git";
 
@@ -149,26 +155,54 @@ function isTerminal(item: ReviewComment | ReviewEdit): boolean {
 }
 
 export class Store {
-  public sessions = loadSessions();
+  public read(sessionId: string): ReviewSession | undefined {
+    return readSession(sessionId);
+  }
 
-  constructor() {
-    for (const session of this.sessions.values()) {
-      session.tools ??= {};
-      for (const page of Object.values(session.pages)) {
-        if (page.kind === "diff") continue;
-        if (fs.existsSync(page.file)) {
-          page.content = fs.readFileSync(page.file, "utf8");
-          page.hash = this.hash(page.content);
-        }
-        for (const comment of page.comments) reanchor(comment, comment.quote, page.content);
-        for (const edit of page.edits) reanchor(edit, edit.originalText, page.content);
-        this.syncTurnAnchors(page);
-      }
+  public has(sessionId: string): boolean {
+    return !!this.read(sessionId);
+  }
+
+  public list(): SessionSummary[] {
+    return listSessionSummaries();
+  }
+
+  public count(): number {
+    return countSessions();
+  }
+
+  public mutate<T>(
+    sessionId: string,
+    change: (session: ReviewSession) => T,
+    commit: (result: T) => boolean = () => true
+  ): T | undefined {
+    const session = this.read(sessionId);
+    if (!session) return undefined;
+    const result = change(session);
+    if (commit(result)) saveSession(session);
+    return result;
+  }
+
+  private hash(content: string | Buffer): string {
+    return crypto.createHash("sha1").update(content).digest("hex");
+  }
+
+  private liveDiffHash(file: string): string {
+    try {
+      const content = fs.lstatSync(file).isSymbolicLink()
+        ? fs.readlinkSync(file)
+        : fs.readFileSync(file);
+      return `live:${this.hash(content)}`;
+    } catch {
+      return "live:missing";
     }
   }
 
-  private hash(content: string): string {
-    return crypto.createHash("sha1").update(content).digest("hex");
+  private capturedLiveDiffHash(file: string, diff: DiffFile): string {
+    if (!diff.newPath) return "live:missing";
+    if (diff.newHash) return `live:${diff.newHash}`;
+    if (diff.newContent !== undefined) return `live:${this.hash(diff.newContent)}`;
+    return this.liveDiffHash(file);
   }
 
   private pageId(): string {
@@ -224,13 +258,7 @@ export class Store {
   }
 
   private addSession(session: ReviewSession): SessionInfo {
-    this.sessions.set(session.id, session);
-    try {
-      this.persist(session.id);
-    } catch (error) {
-      this.sessions.delete(session.id);
-      throw error;
-    }
+    saveSession(session);
     return this.sessionInfo(session);
   }
 
@@ -249,30 +277,101 @@ export class Store {
     return this.addSession(session);
   }
 
-  public reloadPage(sessionId: string, page: PageData, content: string, hash = this.hash(content)) {
+  private reloadFilePage(
+    session: ReviewSession,
+    page: PageData,
+    content: string,
+    hash: string
+  ): void {
     page.content = content;
     page.hash = hash;
     for (const comment of page.comments) reanchor(comment, comment.quote, content);
     for (const edit of page.edits) reanchor(edit, edit.originalText, content);
-    this.syncTurnAnchors(page);
-    this.persist(sessionId);
+    this.syncTurnAnchors(session, page);
   }
 
-  private syncTurnAnchors(page: PageData) {
+  public reloadSource(
+    sessionId: string,
+    file: string,
+    content: string,
+    hash = this.hash(content)
+  ): Array<{ event: "reload" | "stale"; pageId: string }> {
+    const session = this.read(sessionId);
+    if (!session) return [];
+    const events: Array<{ event: "reload" | "stale"; pageId: string }> = [];
+    for (const page of Object.values(session.pages)) {
+      if (page.file !== file) continue;
+      if (page.kind === "diff") {
+        if (!page.liveHead || page.stale) continue;
+        page.stale = true;
+        events.push({ event: "stale", pageId: page.id });
+        continue;
+      }
+      this.reloadFilePage(session, page, content, hash);
+      events.push({ event: "reload", pageId: page.id });
+    }
+    if (events.length) saveSession(session);
+    return events;
+  }
+
+  private reconcileSession(
+    session: ReviewSession
+  ): Array<{ event: "reload" | "stale"; pageId: string }> {
+    const events: Array<{ event: "reload" | "stale"; pageId: string }> = [];
+    for (const page of Object.values(session.pages)) {
+      if (page.kind === "diff") {
+        if (!page.liveHead || page.stale) continue;
+        let changed = this.liveDiffHash(page.file) !== page.hash;
+        if (!page.hash.startsWith("live:")) {
+          if (!page.diff?.newPath) {
+            changed = fs.existsSync(page.file);
+          } else if (page.diff.newContent !== undefined) {
+            try {
+              changed = fs.readFileSync(page.file, "utf8") !== page.diff.newContent;
+            } catch {
+              changed = true;
+            }
+          }
+        }
+        if (changed) {
+          page.stale = true;
+          events.push({ event: "stale", pageId: page.id });
+        }
+        continue;
+      }
+      if (!fs.existsSync(page.file)) continue;
+      let content: string;
+      try {
+        content = fs.readFileSync(page.file, "utf8");
+      } catch {
+        continue;
+      }
+      const hash = this.hash(content);
+      if (hash === page.hash) continue;
+      this.reloadFilePage(session, page, content, hash);
+      events.push({ event: "reload", pageId: page.id });
+    }
+    return events;
+  }
+
+  public reconcile(session: ReviewSession): Array<{ event: "reload" | "stale"; pageId: string }> {
+    const events = this.reconcileSession(session);
+    if (events.length) saveSession(session);
+    return events;
+  }
+
+  private syncTurnAnchors(session: ReviewSession, page: PageData) {
     const anchors = new Map(
       [...page.comments, ...page.edits].map((item) => [item.id, item] as const)
     );
-    for (const session of this.sessions.values()) {
-      if (!session.pages[page.id]) continue;
-      for (const turn of session.turns) {
-        for (const item of turn.items) {
-          if (item.pageId !== page.id) continue;
-          const anchor = anchors.get(item.id);
-          if (!anchor) continue;
-          item.startLine = anchor.startLine;
-          item.endLine = anchor.endLine;
-          item.orphaned = anchor.orphaned;
-        }
+    for (const turn of session.turns) {
+      for (const item of turn.items) {
+        if (item.pageId !== page.id) continue;
+        const anchor = anchors.get(item.id);
+        if (!anchor) continue;
+        item.startLine = anchor.startLine;
+        item.endLine = anchor.endLine;
+        item.orphaned = anchor.orphaned;
       }
     }
   }
@@ -280,21 +379,27 @@ export class Store {
   public createDiffSession(resolved: ResolvedDiff): SessionInfo {
     const pages = resolved.files.map((diff) => {
       const shown = diff.newPath || diff.oldPath || "";
+      const file = path.join(resolved.repoRoot, shown);
+      const hash = resolved.liveHead
+        ? this.capturedLiveDiffHash(file, diff)
+        : this.hash(`${resolved.range}#${shown}#${diff.status}`);
+      const storedDiff = { ...diff };
+      delete storedDiff.newHash;
       const id = this.pageId();
       return {
         id,
-        file: path.join(resolved.repoRoot, shown),
+        file,
         filename: shown,
         kind: "diff" as const,
         content: "",
-        diff,
+        diff: storedDiff,
         repoRoot: resolved.repoRoot,
         range: resolved.range,
         staged: resolved.staged,
         liveHead: resolved.liveHead,
         comments: [],
         edits: [],
-        hash: this.hash(`${resolved.range}#${shown}#${diff.status}`),
+        hash,
       } satisfies PageData;
     });
     const id = this.sessionId();
@@ -316,66 +421,87 @@ export class Store {
   }
 
   public getPage(sessionId: string, pageId: string): PageData | undefined {
-    return this.sessions.get(sessionId)?.pages[pageId];
+    return this.read(sessionId)?.pages[pageId];
   }
 
-  public replaceReviewMap(sessionId: string, input: unknown): SessionInfo {
+  public refreshDiff(sessionId: string, pageId: string, diff: DiffFile): boolean {
+    return !!this.mutate(sessionId, (session) => {
+      const page = session.pages[pageId];
+      if (!page || page.kind !== "diff") return false;
+      page.comments = [];
+      page.edits = [];
+      page.hash = this.capturedLiveDiffHash(page.file, diff);
+      page.diff = { ...diff };
+      delete page.diff.newHash;
+      page.stale = false;
+      return true;
+    });
+  }
+
+  public replaceReviewMap(
+    sessionId: string,
+    input: unknown
+  ): {
+    info: SessionInfo;
+    session: ReviewSession;
+    events: Array<{ event: "reload" | "stale"; pageId: string }>;
+  } {
     const request = normalizeReviewMapRequest(input);
-    const session = this.sessions.get(sessionId);
-    if (!session) throw new ReviewMapError("Review session not found", 404);
-
-    const pages: Record<string, PageData> = {};
-    const items: ReviewMap["items"] = [];
-    for (const item of request.items) {
-      let page: PageData | undefined;
-      if (item.source.kind === "page") {
-        page = session.pages[item.source.pageId];
-        if (!page) throw new ReviewMapError(`Review page not found: ${item.source.pageId}`, 404);
-      } else {
-        const file = item.source.file;
-        if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
-          throw new ReviewMapError(`File not found: ${file}`, 404);
+    const result = this.mutate(sessionId, (session) => {
+      const pages: Record<string, PageData> = {};
+      const items: ReviewMap["items"] = [];
+      for (const item of request.items) {
+        let page: PageData | undefined;
+        if (item.source.kind === "page") {
+          page = session.pages[item.source.pageId];
+          if (!page) throw new ReviewMapError(`Review page not found: ${item.source.pageId}`, 404);
+        } else {
+          const file = item.source.file;
+          if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+            throw new ReviewMapError(`File not found: ${file}`, 404);
+          }
+          page = [...Object.values(session.pages), ...Object.values(pages)].find(
+            (candidate) => candidate.file === file
+          );
+          page ??= this.filePage(file);
         }
-        page = [...Object.values(session.pages), ...Object.values(pages)].find(
-          (candidate) => candidate.file === file
-        );
-        page ??= this.filePage(file);
+        if (pages[page.id]) {
+          throw new ReviewMapError(`Duplicate Review Map page: ${page.id}`, 409);
+        }
+        pages[page.id] = page;
+        items.push({ pageId: page.id, path: item.path });
       }
-      if (pages[page.id]) throw new ReviewMapError(`Duplicate Review Map page: ${page.id}`, 409);
-      pages[page.id] = page;
-      items.push({ pageId: page.id, path: item.path });
-    }
 
-    for (const [pageId, page] of Object.entries(session.pages)) {
-      if (pages[pageId]) continue;
-      if ([...page.comments, ...page.edits].some((item) => !isTerminal(item))) {
-        throw new ReviewMapError(`Page has unresolved annotations: ${page.filename}`, 409);
+      for (const [pageId, page] of Object.entries(session.pages)) {
+        if (pages[pageId]) continue;
+        if ([...page.comments, ...page.edits].some((item) => !isTerminal(item))) {
+          throw new ReviewMapError(`Page has unresolved annotations: ${page.filename}`, 409);
+        }
       }
-    }
 
-    const nextSession: ReviewSession = {
-      ...session,
-      reviewMap: { title: request.title, items },
-      pages,
-      activePageId: pages[session.activePageId] ? session.activePageId : items[0].pageId,
-      lastSeen: Date.now(),
-    };
-    this.sessions.set(sessionId, nextSession);
-    try {
-      this.persist(sessionId);
-    } catch (error) {
-      this.sessions.set(sessionId, session);
-      throw error;
-    }
-    return this.sessionInfo(nextSession);
+      session.reviewMap = { title: request.title, items };
+      session.pages = pages;
+      session.activePageId = pages[session.activePageId] ? session.activePageId : items[0].pageId;
+      session.lastSeen = Date.now();
+      return {
+        info: this.sessionInfo(session),
+        session,
+        events: this.reconcileSession(session),
+      };
+    });
+    if (!result) throw new ReviewMapError("Review session not found", 404);
+    return result;
   }
 
   public addComment(sessionId: string, pageId: string, comment: ReviewComment): PageData | null {
-    const page = this.getPage(sessionId, pageId);
-    if (!page) return null;
-    page.comments.push(comment);
-    this.persist(sessionId);
-    return page;
+    return (
+      this.mutate(sessionId, (session) => {
+        const page = session.pages[pageId];
+        if (!page) return null;
+        page.comments.push(comment);
+        return page;
+      }) ?? null
+    );
   }
 
   public updateComment(
@@ -384,28 +510,37 @@ export class Store {
     commentId: string,
     feedback: string
   ): PageData | null {
-    const page = this.getPage(sessionId, pageId);
-    const comment = page?.comments.find((candidate) => candidate.id === commentId);
-    if (!page || !comment) return null;
-    comment.feedback = feedback;
-    this.persist(sessionId);
-    return page;
+    return (
+      this.mutate(sessionId, (session) => {
+        const page = session.pages[pageId];
+        const comment = page?.comments.find((candidate) => candidate.id === commentId);
+        if (!page || !comment) return null;
+        comment.feedback = feedback;
+        return page;
+      }) ?? null
+    );
   }
 
   public removeComment(sessionId: string, pageId: string, commentId: string): PageData | null {
-    const page = this.getPage(sessionId, pageId);
-    if (!page) return null;
-    page.comments = page.comments.filter((comment) => comment.id !== commentId);
-    this.persist(sessionId);
-    return page;
+    return (
+      this.mutate(sessionId, (session) => {
+        const page = session.pages[pageId];
+        if (!page) return null;
+        page.comments = page.comments.filter((comment) => comment.id !== commentId);
+        return page;
+      }) ?? null
+    );
   }
 
   public addEdit(sessionId: string, pageId: string, edit: ReviewEdit): PageData | null {
-    const page = this.getPage(sessionId, pageId);
-    if (!page) return null;
-    page.edits.push(edit);
-    this.persist(sessionId);
-    return page;
+    return (
+      this.mutate(sessionId, (session) => {
+        const page = session.pages[pageId];
+        if (!page) return null;
+        page.edits.push(edit);
+        return page;
+      }) ?? null
+    );
   }
 
   public updateEdit(
@@ -414,87 +549,36 @@ export class Store {
     editId: string,
     suggestedText: string
   ): PageData | null {
-    const page = this.getPage(sessionId, pageId);
-    const edit = page?.edits.find((candidate) => candidate.id === editId);
-    if (!page || !edit) return null;
-    edit.suggestedText = suggestedText;
-    this.persist(sessionId);
-    return page;
-  }
-
-  public removeEdit(sessionId: string, pageId: string, editId: string): PageData | null {
-    const page = this.getPage(sessionId, pageId);
-    if (!page) return null;
-    page.edits = page.edits.filter((edit) => edit.id !== editId);
-    this.persist(sessionId);
-    return page;
-  }
-
-  public setItemStatus(
-    sessionId: string,
-    id: string,
-    status: ItemStatus,
-    note?: string
-  ): { page: PageData; item: ReviewComment | ReviewEdit } | null {
-    const session = this.sessions.get(sessionId);
-    if (!session) return null;
-    for (const page of Object.values(session.pages)) {
-      const item =
-        page.comments.find((comment) => comment.id === id) ??
-        page.edits.find((edit) => edit.id === id);
-      if (!item?.sent) continue;
-      item.status = status;
-      if (note?.trim()) {
-        item.replies = [
-          ...(item.replies ?? []),
-          { from: "agent", text: note.trim(), at: Date.now() },
-        ];
-      }
-      this.persist(sessionId);
-      return { page, item };
-    }
-    return null;
-  }
-
-  public addTool(sessionId: string, interaction: ToolInteraction): boolean {
-    const session = this.sessions.get(sessionId);
-    if (!session || session.tools[interaction.id]) return false;
-    session.tools[interaction.id] = interaction;
-    try {
-      this.persist(sessionId);
-    } catch (error) {
-      delete session.tools[interaction.id];
-      throw error;
-    }
-    return true;
-  }
-
-  public readyTools(sessionId: string): ToolFeedback[] {
-    const session = this.sessions.get(sessionId);
-    if (!session) return [];
-    return Object.values(session.tools).flatMap((tool) =>
-      tool.state === "ready"
-        ? [
-            {
-              id: tool.id,
-              tool: tool.tool,
-              result: tool.result,
-              replies: tool.replies,
-              anchor: tool.request.anchor,
-            },
-          ]
-        : []
+    return (
+      this.mutate(sessionId, (session) => {
+        const page = session.pages[pageId];
+        const edit = page?.edits.find((candidate) => candidate.id === editId);
+        if (!page || !edit) return null;
+        edit.suggestedText = suggestedText;
+        return page;
+      }) ?? null
     );
   }
 
-  public markToolsSent(sessionId: string, ids: string[]): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    for (const id of ids) {
-      const tool = session.tools[id];
-      if (tool?.state === "ready") session.tools[id] = { ...tool, state: "sent" };
-    }
-    this.persist(sessionId);
+  public removeEdit(sessionId: string, pageId: string, editId: string): PageData | null {
+    return (
+      this.mutate(sessionId, (session) => {
+        const page = session.pages[pageId];
+        if (!page) return null;
+        page.edits = page.edits.filter((edit) => edit.id !== editId);
+        return page;
+      }) ?? null
+    );
+  }
+
+  public addTool(sessionId: string, interaction: ToolInteraction): boolean {
+    return (
+      this.mutate(sessionId, (session) => {
+        if (session.tools[interaction.id]) return false;
+        session.tools[interaction.id] = interaction;
+        return true;
+      }) ?? false
+    );
   }
 
   public actOnTool(
@@ -506,94 +590,48 @@ export class Store {
       | { type: "reset" }
       | { type: "reply"; text: string }
   ): ToolInteraction | null {
-    const session = this.sessions.get(sessionId);
-    const tool = session?.tools[id];
-    if (!session || !tool) return null;
+    return (
+      this.mutate(sessionId, (session) => {
+        const tool = session.tools[id];
+        if (!tool) return null;
 
-    let next: ToolInteraction | null = null;
-    if (action.type === "submit" && tool.state === "open") {
-      next = { ...tool, state: "ready", result: { kind: "submitted", value: action.value } };
-    } else if (action.type === "dismiss" && tool.state === "open") {
-      next = { ...tool, state: "ready", result: { kind: "dismissed" } };
-    } else if (action.type === "reset" && tool.state === "ready" && tool.replies.length === 0) {
-      const { result: _result, ...base } = tool;
-      next = { ...base, state: "open" };
-    } else if (action.type === "reply" && tool.state === "awaiting-answer" && action.text.trim()) {
-      next = {
-        ...tool,
-        state: "ready",
-        replies: [...tool.replies, { from: "user", text: action.text.trim(), at: Date.now() }],
-      };
-    }
-    if (!next) return null;
-    session.tools[id] = next;
-    this.persist(sessionId);
-    return next;
-  }
-
-  public setToolStatus(
-    sessionId: string,
-    id: string,
-    status: ItemStatus,
-    note?: string
-  ): ToolInteraction | null {
-    const session = this.sessions.get(sessionId);
-    const tool = session?.tools[id];
-    if (!session || tool?.state !== "sent" || status === "open") return null;
-    const replies = note?.trim()
-      ? [...tool.replies, { from: "agent" as const, text: note.trim(), at: Date.now() }]
-      : tool.replies;
-    const next: ToolInteraction =
-      status === "question"
-        ? { ...tool, state: "awaiting-answer", replies }
-        : { ...tool, state: "resolved", status, replies };
-    session.tools[id] = next;
-    this.persist(sessionId);
-    return next;
-  }
-
-  public setBatch(sessionId: string, batch: ReviewBatch): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    session.pendingBatch = { batch, delivered: false };
-    this.persist(sessionId);
+        let next: ToolInteraction | null = null;
+        if (action.type === "submit" && tool.state === "open") {
+          next = { ...tool, state: "ready", result: { kind: "submitted", value: action.value } };
+        } else if (action.type === "dismiss" && tool.state === "open") {
+          next = { ...tool, state: "ready", result: { kind: "dismissed" } };
+        } else if (action.type === "reset" && tool.state === "ready" && tool.replies.length === 0) {
+          const { result: _result, ...base } = tool;
+          next = { ...base, state: "open" };
+        } else if (
+          action.type === "reply" &&
+          tool.state === "awaiting-answer" &&
+          action.text.trim()
+        ) {
+          next = {
+            ...tool,
+            state: "ready",
+            replies: [...tool.replies, { from: "user", text: action.text.trim(), at: Date.now() }],
+          };
+        }
+        if (!next) return null;
+        session.tools[id] = next;
+        return next;
+      }) ?? null
+    );
   }
 
   public getBatch(sessionId: string) {
-    return this.sessions.get(sessionId)?.pendingBatch;
-  }
-
-  public clearBatch(sessionId: string): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    delete session.pendingBatch;
-    this.persist(sessionId);
-  }
-
-  public clearSentFeedback(sessionId: string): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    for (const page of Object.values(session.pages)) {
-      page.comments = [];
-      page.edits = [];
-    }
-    this.persist(sessionId);
-  }
-
-  public persist(sessionId: string): void {
-    const session = this.sessions.get(sessionId);
-    if (session) saveSession(session);
+    return this.read(sessionId)?.pendingBatch;
   }
 
   public remove(sessionId: string): void {
-    this.sessions.delete(sessionId);
     deleteSession(sessionId);
   }
 
   public pruneAll(): { sessions: number; files: number } {
-    const sessions = this.sessions.size;
+    const sessions = this.count();
     const files = pruneSessionFiles();
-    this.sessions.clear();
     return { sessions, files };
   }
 }

@@ -10,6 +10,14 @@ export interface StoredSessionV4 {
   session: ReviewSession;
 }
 
+export interface SessionSummary {
+  id: string;
+  lastSeen: number;
+  title: string;
+  kind: ReviewSession["pages"][string]["kind"];
+  files: string[];
+}
+
 function sessionStateDir(): string {
   return path.join(stateDir(), "state-v4");
 }
@@ -152,39 +160,66 @@ function quarantine(file: string, reason: unknown, sessionId?: string): void {
   console.error(`Quarantined invalid session ${path.basename(file)}: ${String(reason)}`);
 }
 
-export function loadSessions(): Map<string, ReviewSession> {
+function readStoredSession(file: string, name: string): ReviewSession | undefined {
+  let stored: Partial<StoredSessionV4> | undefined;
+  try {
+    stored = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<StoredSessionV4>;
+    if (stored.schemaVersion !== 4) {
+      console.error(`Ignored session schema in ${name}`);
+      return undefined;
+    }
+    if (stored.session && typeof stored.session === "object") stored.session.tools ??= {};
+    if (!isReviewSession(stored.session) || name !== `${stored.session.id}.json`) {
+      throw new Error("invalid schema-v4 session record");
+    }
+    return stored.session;
+  } catch (error) {
+    const sessionId =
+      stored?.session && typeof stored.session === "object" && typeof stored.session.id === "string"
+        ? stored.session.id
+        : undefined;
+    quarantine(file, error, sessionId);
+    return undefined;
+  }
+}
+
+export function readSession(sessionId: string): ReviewSession | undefined {
+  if (!/^s_[a-zA-Z0-9_]+$/.test(sessionId)) return undefined;
   ensureSessionDirs();
-  const sessions = new Map<string, ReviewSession>();
+  const file = sessionPath(sessionId);
+  if (!fs.existsSync(file)) return undefined;
+  return readStoredSession(file, path.basename(file));
+}
+
+export function listSessionSummaries(): SessionSummary[] {
+  ensureSessionDirs();
+  const summaries: SessionSummary[] = [];
+  const tools = new Map<string, string[]>();
 
   for (const name of fs.readdirSync(sessionsDir())) {
     if (!name.endsWith(".json")) continue;
-    const file = path.join(sessionsDir(), name);
-    try {
-      const stored = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<StoredSessionV4>;
-      if (stored.schemaVersion !== 4) {
-        console.error(`Ignored session schema in ${name}`);
-        continue;
-      }
-      if (stored.session && typeof stored.session === "object") stored.session.tools ??= {};
-      if (!isReviewSession(stored.session) || name !== `${stored.session.id}.json`) {
-        throw new Error("invalid schema-v4 session record");
-      }
-      sessions.set(stored.session.id, stored.session);
-    } catch (error) {
-      let sessionId: string | undefined;
-      try {
-        const stored = JSON.parse(fs.readFileSync(file, "utf8")) as { session?: { id?: unknown } };
-        if (typeof stored.session?.id === "string") sessionId = stored.session.id;
-      } catch {}
-      quarantine(file, error, sessionId);
-    }
+    const session = readStoredSession(path.join(sessionsDir(), name), name);
+    if (!session) continue;
+    tools.set(session.id, Object.keys(session.tools));
+    const files = session.reviewMap.items
+      .map((item) => session.pages[item.pageId]?.filename)
+      .filter((file): file is string => !!file);
+    if (!files.length) continue;
+    summaries.push({
+      id: session.id,
+      lastSeen: session.lastSeen,
+      title: session.reviewMap.title,
+      kind: session.pages[session.activePageId]?.kind ?? "markdown",
+      files,
+    });
   }
 
-  pruneToolArtifacts(
-    new Map([...sessions].map(([id, session]) => [id, Object.keys(session.tools)]))
-  );
+  pruneToolArtifacts(tools);
+  return summaries.sort((a, b) => b.lastSeen - a.lastSeen);
+}
 
-  return sessions;
+export function countSessions(): number {
+  return listSessionSummaries().length;
 }
 
 export function saveSession(session: ReviewSession): void {

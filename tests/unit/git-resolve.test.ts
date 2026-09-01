@@ -180,6 +180,7 @@ describe("resolveDiff", () => {
     expect(binary.status).toBe("modified");
     expect(binary.oldContent).toBeUndefined();
     expect(binary.newContent).toBeUndefined();
+    expect(binary.newHash).toMatch(/^[a-f0-9]{40}$/);
   });
 
   it("marks a committed range as fixed and a working-tree range as live", () => {

@@ -36,7 +36,7 @@ describe("tool feedback lifecycle", () => {
   });
 
   function addQuestion(): ToolInteraction {
-    const pageId = server.store.sessions.get(sessionId)!.activePageId;
+    const pageId = server.store.read(sessionId)!.activePageId;
     const interaction: ToolInteraction = {
       id: "ti_question",
       tool: "question",
@@ -59,14 +59,66 @@ describe("tool feedback lifecycle", () => {
   it("resets an unsent result", async () => {
     addQuestion();
     expect((await action({ action: "submit", value: "stable" })).status).toBe(200);
-    expect(server.store.sessions.get(sessionId)!.tools.ti_question.state).toBe("ready");
+    expect(server.store.read(sessionId)!.tools.ti_question.state).toBe("ready");
 
     expect((await action({ action: "reset" })).status).toBe(200);
-    expect(server.store.sessions.get(sessionId)!.tools.ti_question.state).toBe("open");
+    expect(server.store.read(sessionId)!.tools.ti_question.state).toBe("open");
+  });
+
+  it("preserves concurrent page and tool mutations", async () => {
+    const question = addQuestion();
+    const pageId = server.store.read(sessionId)!.activePageId;
+    const [toolResponse, commentResponse] = await Promise.all([
+      action({ action: "submit", value: "stable" }),
+      api(`/api/session/${sessionId}/page/${pageId}/comment`, {
+        method: "POST",
+        body: JSON.stringify({ feedback: "Keep the release note concise" }),
+      }),
+    ]);
+
+    expect([toolResponse.status, commentResponse.status]).toEqual([200, 200]);
+    const stored = server.store.read(sessionId)!;
+    expect(stored.tools[question.id].state).toBe("ready");
+    expect(stored.pages[pageId].comments[0].feedback).toBe("Keep the release note concise");
+  });
+
+  it("emits no success event when a durable mutation fails", async () => {
+    const pageId = server.store.read(sessionId)!.activePageId;
+    await api(`/api/session/${sessionId}/page/${pageId}/comment`, {
+      method: "POST",
+      body: JSON.stringify({ feedback: "Persist this first" }),
+    });
+    const abort = new AbortController();
+    const events = await fetch(`http://127.0.0.1:${port}/events?session=${sessionId}`, {
+      signal: abort.signal,
+    });
+    const reader = events.body!.getReader();
+    await reader.read();
+
+    const mutate = server.store.mutate.bind(server.store);
+    server.store.mutate = (() => {
+      throw new Error("disk unavailable");
+    }) as typeof server.store.mutate;
+    try {
+      const response = await api(`/api/session/${sessionId}/send`, {
+        method: "POST",
+        body: "{}",
+      });
+      expect(response.status).toBe(500);
+      const next = await Promise.race([
+        reader.read().then(() => "event"),
+        Bun.sleep(30).then(() => "timeout"),
+      ]);
+      expect(next).toBe("timeout");
+    } finally {
+      server.store.mutate = mutate;
+      abort.abort();
+      await Bun.sleep(10);
+    }
   });
 
   it("invokes a validated package and rejects compiler failures without session mutation", async () => {
-    const pageId = server.store.sessions.get(sessionId)!.activePageId;
+    const pageId = server.store.read(sessionId)!.activePageId;
     const opened = await api(`/api/session/${sessionId}/tool/button`, {
       method: "POST",
       body: JSON.stringify({
@@ -77,7 +129,7 @@ describe("tool feedback lifecycle", () => {
     });
     expect(opened.status).toBe(200);
     const result = await opened.json();
-    expect(server.store.sessions.get(sessionId)!.tools[result.id]).toMatchObject({
+    expect(server.store.read(sessionId)!.tools[result.id]).toMatchObject({
       state: "open",
       request: { anchor: { pageId, line: 1 } },
     });
@@ -103,13 +155,13 @@ describe("tool feedback lifecycle", () => {
       path.join(blocked, "Tool.tsx"),
       'import fs from "node:fs"; export default fs;\n'
     );
-    const before = Object.keys(server.store.sessions.get(sessionId)!.tools);
+    const before = Object.keys(server.store.read(sessionId)!.tools);
     const rejected = await api(`/api/session/${sessionId}/tool/blocked`, {
       method: "POST",
       body: JSON.stringify({ prompt: "Reject", data: null }),
     });
     expect(rejected.status).toBe(400);
-    expect(Object.keys(server.store.sessions.get(sessionId)!.tools)).toEqual(before);
+    expect(Object.keys(server.store.read(sessionId)!.tools)).toEqual(before);
     fs.rmSync(blocked, { recursive: true, force: true });
   });
 
@@ -164,10 +216,10 @@ describe("tool feedback lifecycle", () => {
     expect(questioned.status).toBe(200);
 
     await api(`/api/session/${sessionId}/poll?ack=1&timeout=1`);
-    expect(server.store.sessions.get(sessionId)!.tools.ti_question.state).toBe("awaiting-answer");
+    expect(server.store.read(sessionId)!.tools.ti_question.state).toBe("awaiting-answer");
 
     expect((await action({ action: "reply", text: "Use stable" })).status).toBe(200);
-    expect(server.store.sessions.get(sessionId)!.tools.ti_question.state).toBe("ready");
+    expect(server.store.read(sessionId)!.tools.ti_question.state).toBe("ready");
     expect((await action({ action: "reset" })).status).toBe(409);
 
     expect(
@@ -193,7 +245,7 @@ describe("tool feedback lifecycle", () => {
       method: "POST",
       body: JSON.stringify({ items: [{ id: "ti_question", status: "applied" }] }),
     });
-    expect(server.store.sessions.get(sessionId)!.tools.ti_question).toMatchObject({
+    expect(server.store.read(sessionId)!.tools.ti_question).toMatchObject({
       state: "resolved",
       status: "applied",
     });

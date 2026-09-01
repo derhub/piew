@@ -99,7 +99,7 @@ describe("Diff Session Integration", () => {
 
   it("serves both blob sides from the per-page route", async () => {
     const created = await openDiff();
-    const reviewSession = server.store.sessions.get(created.sessionId)!;
+    const reviewSession = server.store.read(created.sessionId)!;
     const key = created.reviewMap.items
       .map((item) => item.pageId)
       .find((k) => {
@@ -176,7 +176,7 @@ describe("Diff Session Integration", () => {
 
     expect(restarted.store.getBatch(pendingSessionId)).toBeDefined();
     expect(
-      Object.values(restarted.store.sessions.get(pendingSessionId)!.pages).some(
+      Object.values(restarted.store.read(pendingSessionId)!.pages).some(
         (page) => page.kind === "diff"
       )
     ).toBe(true);
