@@ -6,6 +6,7 @@ import {
   pollCommand,
   pruneCommand,
   respondCommand,
+  restartCommand,
   statusCommand,
 } from "../src/cli/index";
 import { toolsCommand } from "../src/cli/tools";
@@ -26,6 +27,7 @@ Usage:
   piew respond <session-id>           Answer the batch you were given; JSON on stdin
   piew status <session-id>            Check whether feedback is waiting without blocking
   piew prune                          Remove all stored Piew sessions and session state
+  piew restart                        Restart the local review daemon
 
 Open and diff print compact JSON with the session ID used by every follow-up command:
   piew poll s_123
@@ -126,6 +128,8 @@ if (command === "poll") {
   await statusCommand(sessionId);
 } else if (command === "prune") {
   await pruneCommand();
+} else if (command === "restart") {
+  await restartCommand();
 } else {
   // All non-flag arguments are file paths, except the value --timeout takes.
   const files = argv.filter((a, i) => !a.startsWith("-") && argv[i - 1] !== "--timeout");

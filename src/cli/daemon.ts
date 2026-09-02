@@ -123,7 +123,7 @@ export async function isServerAlive(port: number): Promise<boolean> {
   return (await readServerHealth(port))?.protocol === SERVER_PROTOCOL;
 }
 
-async function stopMismatchedDaemon(record: ServerRecord, health: ServerHealth): Promise<boolean> {
+async function stopDaemon(record: ServerRecord, health: ServerHealth | null): Promise<boolean> {
   let shutdownAccepted = false;
   try {
     const response = await fetch(`http://127.0.0.1:${record.port}/shutdown`, {
@@ -134,17 +134,28 @@ async function stopMismatchedDaemon(record: ServerRecord, health: ServerHealth):
     shutdownAccepted = response.ok;
   } catch {}
 
-  if (!shutdownAccepted && health.pid === record.pid) {
+  if (!shutdownAccepted && (health?.pid === record.pid || readDaemonLock()?.pid === record.pid)) {
     try {
       process.kill(record.pid, "SIGTERM");
     } catch {}
   }
 
   for (let i = 0; i < 40; i++) {
-    if (!(await readServerHealth(record.port))) return true;
+    if (!(await readServerHealth(record.port)) && readDaemonLock()?.pid !== record.pid) return true;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return false;
+}
+
+export async function restartDaemon(): Promise<ServerRecord> {
+  const existing = readServerRecord();
+  if (existing) {
+    const health = await readServerHealth(existing.port);
+    if (!(await stopDaemon(existing, health))) {
+      throw new Error(`Could not stop review daemon. See ${daemonLogPath()}`);
+    }
+  }
+  return ensureDaemonRunning();
 }
 
 export async function ensureDaemonRunning(): Promise<ServerRecord> {
@@ -154,7 +165,7 @@ export async function ensureDaemonRunning(): Promise<ServerRecord> {
   if (existing) {
     const health = await readServerHealth(existing.port);
     if (health?.protocol === SERVER_PROTOCOL && health.pid === existing.pid) return existing;
-    if (health && !(await stopMismatchedDaemon(existing, health))) {
+    if (health && !(await stopDaemon(existing, health))) {
       throw new Error(`Could not stop outdated review daemon. See ${logPath}`);
     }
   }

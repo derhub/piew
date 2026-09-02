@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { canonicalTarget, stateDir } from "./paths";
-import { ensureDaemonRunning, openBrowser, readServerRecord, isServerAlive } from "./daemon";
+import {
+  ensureDaemonRunning,
+  isServerAlive,
+  openBrowser,
+  readServerRecord,
+  restartDaemon,
+} from "./daemon";
 import { resolveDiff } from "./git";
 import type { ReviewMap } from "../lib/types";
 
@@ -274,4 +280,9 @@ export async function pruneCommand(): Promise<void> {
     process.exit(1);
   }
   writeJson({ sessions: body.sessions ?? 0, files: body.files ?? 0 });
+}
+
+export async function restartCommand(): Promise<void> {
+  const daemon = await restartDaemon();
+  writeJson({ pid: daemon.pid, port: daemon.port });
 }

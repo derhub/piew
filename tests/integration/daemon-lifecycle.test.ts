@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { SERVER_PROTOCOL, daemonLockPath, daemonLogPath, stateDir } from "../../src/cli/paths";
 
 const DAEMON_MODULE = pathToFileURL(path.resolve(__dirname, "../../src/cli/daemon.ts")).href;
+const CLI = path.resolve(__dirname, "../../bin/piew.ts");
 const startedPids = new Set<number>();
 
 async function startDaemon(dir: string) {
@@ -46,6 +47,23 @@ async function stopProcess(pid: number) {
 async function stopStartedDaemons() {
   await Promise.all([...startedPids].map(stopProcess));
   startedPids.clear();
+}
+
+async function restartDaemon(dir: string) {
+  const proc = Bun.spawn([process.execPath, CLI, "restart"], {
+    env: { ...process.env, PIEW_DIR: dir, PIEW_NO_OPEN: "1" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  if (exitCode !== 0) throw new Error(stderr || stdout);
+  const record = JSON.parse(stdout.trim()) as { pid: number; port: number };
+  startedPids.add(record.pid);
+  return record;
 }
 
 describe("daemon lifecycle", () => {
@@ -91,6 +109,23 @@ describe("daemon lifecycle", () => {
       expect(record.pid).not.toBe(2_147_483_647);
       expect(JSON.parse(fs.readFileSync(path.join(dir, "daemon.lock"), "utf8")).pid).toBe(
         record.pid
+      );
+    } finally {
+      await stopStartedDaemons();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("restarts the running daemon", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "piew-daemon-restart-"));
+
+    try {
+      const first = await startDaemon(dir);
+      const restarted = await restartDaemon(dir);
+
+      expect(restarted.pid).not.toBe(first.pid);
+      expect(JSON.parse(fs.readFileSync(path.join(dir, "daemon.lock"), "utf8")).pid).toBe(
+        restarted.pid
       );
     } finally {
       await stopStartedDaemons();
