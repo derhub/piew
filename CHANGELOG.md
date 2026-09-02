@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/derhub/piew/compare/v0.5.0...v0.6.0) (2026-09-02)
+
+
+### Features
+
+* **cli:** add daemon restart command ([fcbfe03](https://github.com/derhub/piew/commit/fcbfe0383afa316c2685acebca67dbcc685d332e))
+* **cli:** add daemon restart command ([a952577](https://github.com/derhub/piew/commit/a95257701b56db187ed45dfe6938880845b1b072))
+
+
+### Performance
+
+* **session:** load sessions from files on demand ([d9d216c](https://github.com/derhub/piew/commit/d9d216c7387cea204902247a7a8c9c1e17d48e48))
+* **session:** load sessions from files on demand ([c65a5b9](https://github.com/derhub/piew/commit/c65a5b9347e916d4832e83ac7e39d2db34185925))
+
 ## [0.5.0](https://github.com/derhub/piew/compare/v0.4.0...v0.5.0) (2026-08-30)
 
 
