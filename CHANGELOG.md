@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1](https://github.com/derhub/piew/compare/v0.6.0...v0.6.1) (2026-09-03)
+
+
+### Performance
+
+* **review:** load page before source reconciliation ([eb6e44d](https://github.com/derhub/piew/commit/eb6e44d46c45184edf8fe5fe8da224cd7e3d32ff))
+* **review:** load page before source reconciliation ([ca25148](https://github.com/derhub/piew/commit/ca251480b4c689fe997ca00e82c17a5e9fa58631))
+
 ## [0.6.0](https://github.com/derhub/piew/compare/v0.5.0...v0.6.0) (2026-09-02)
 
 
