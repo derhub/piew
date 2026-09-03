@@ -776,6 +776,40 @@ test.describe("on this page", () => {
 });
 
 test.describe("page loading", () => {
+  test("loads the page before activating source reconciliation", async ({ page, request }) => {
+    const session = await openSession(request);
+    let releasePage!: () => void;
+    const pageBlocked = new Promise<void>((resolve) => {
+      releasePage = resolve;
+    });
+    let eventsRequested = false;
+    await page.route("**/events?*", async (route) => {
+      eventsRequested = true;
+      await route.continue();
+    });
+    await page.route(
+      `**/api/session/${session.sessionId}/page/${session.pageId}`,
+      async (route) => {
+        await pageBlocked;
+        await route.continue();
+      },
+      { times: 1 }
+    );
+
+    await page.goto(`/review/${session.sessionId}`);
+
+    try {
+      await expect(page.getByText("Loading fixture.md...")).toBeVisible();
+      await page.waitForTimeout(100);
+      expect(eventsRequested).toBe(false);
+    } finally {
+      releasePage();
+    }
+
+    await expect(page.getByRole("heading", { name: "Review fixture" })).toBeVisible();
+    await expect.poll(() => eventsRequested).toBe(true);
+  });
+
   test("shows the server error and retries the page", async ({ page, request }) => {
     const session = await openSession(request);
     let attempts = 0;
