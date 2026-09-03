@@ -241,15 +241,23 @@ function ReviewSessionComponent() {
         prev && data.pages[prev] ? prev : data.activePageId || data.reviewMap.items[0]?.pageId || ""
       );
       setLoading(false);
+      return data;
     } catch (err: any) {
       if (request !== sessionRequestRef.current) return;
       setError(err.message || "Failed to load session");
       setLoading(false);
+      return undefined;
     }
   }, [sessionId]);
 
   const [activeContentState, setActiveContentState] = React.useState<PageContentState | null>(null);
   const [contentRevision, setContentRevision] = React.useState(0);
+  const [eventSessionId, setEventSessionId] = React.useState("");
+  const activeContentRef = React.useRef<PageContentState | null>(null);
+
+  React.useEffect(() => {
+    activeContentRef.current = activeContentState;
+  }, [activeContentState]);
 
   // Content is fetched per page on open, so the session payload stays flat no
   // matter how many files the range touches.
@@ -303,6 +311,7 @@ function ReviewSessionComponent() {
         });
       } finally {
         window.clearTimeout(timeout);
+        if (!controller.signal.aborted) setEventSessionId(sessionId);
       }
     })();
     return () => {
@@ -312,13 +321,24 @@ function ReviewSessionComponent() {
   }, [activeKey, contentRevision, sessionId]);
 
   React.useEffect(() => {
-    loadSession();
+    void loadSession();
+  }, [loadSession]);
 
+  React.useEffect(() => {
+    if (eventSessionId !== sessionId) return;
     const eventSource = new EventSource(`/events?session=${sessionId}`);
     const refresh = () => void loadSession();
     eventSource.addEventListener("open", () => {
-      setContentRevision((revision) => revision + 1);
-      refresh();
+      void loadSession().then((data) => {
+        const current = activeContentRef.current;
+        if (
+          data &&
+          current?.status === "ready" &&
+          data.pages[current.pageId]?.hash !== current.body.hash
+        ) {
+          setContentRevision((revision) => revision + 1);
+        }
+      });
     });
     eventSource.addEventListener("refresh", refresh);
     eventSource.addEventListener("stale", refresh);
@@ -341,7 +361,7 @@ function ReviewSessionComponent() {
     });
 
     return () => eventSource.close();
-  }, [sessionId, loadSession]);
+  }, [eventSessionId, sessionId, loadSession]);
 
   const activePage = session?.pages[activeKey];
   const activePageIsImage = Boolean(activePage && isImageUrl(activePage.filename));
