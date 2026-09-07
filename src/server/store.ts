@@ -16,7 +16,6 @@ import type {
   ToolInteraction,
 } from "../lib/types";
 import {
-  countSessions,
   deleteSession,
   listSessionSummaries,
   pruneSessionFiles,
@@ -28,6 +27,10 @@ import {
 export type { ResolvedDiff, DiffSource } from "../cli/git";
 
 const MARKDOWN_EXT = new Set([".md", ".markdown"]);
+
+// Write-behind window. Long enough that a burst of keystrokes is one write, short
+// enough that a SIGKILL loses at most this much of a browser-side edit.
+const FLUSH_DELAY_MS = 250;
 
 type LineAnchor = {
   startLine?: number;
@@ -160,8 +163,15 @@ function isTerminal(item: ReviewComment | ReviewEdit): boolean {
 }
 
 export class Store {
+  private sessions = new Map<string, ReviewSession>();
+  private pending = new Map<string, ReturnType<typeof setTimeout>>();
+
   public read(sessionId: string): ReviewSession | undefined {
-    return readSession(sessionId);
+    const live = this.sessions.get(sessionId);
+    if (live) return live;
+    const session = readSession(sessionId);
+    if (session) this.sessions.set(sessionId, session);
+    return session;
   }
 
   public has(sessionId: string): boolean {
@@ -169,11 +179,40 @@ export class Store {
   }
 
   public list(): SessionSummary[] {
-    return listSessionSummaries();
+    return listSessionSummaries((sessionId) => this.sessions.get(sessionId));
   }
 
   public count(): number {
-    return countSessions();
+    return this.list().length;
+  }
+
+  public loadedCount(): number {
+    return this.sessions.size;
+  }
+
+  private markDirty(sessionId: string): void {
+    if (this.pending.has(sessionId)) return;
+    const timer = setTimeout(() => this.flush(sessionId), FLUSH_DELAY_MS);
+    timer.unref?.();
+    this.pending.set(sessionId, timer);
+  }
+
+  public flush(sessionId: string): void {
+    const timer = this.pending.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.pending.delete(sessionId);
+    const session = this.sessions.get(sessionId);
+    if (session) saveSession(session);
+  }
+
+  public flushAll(): void {
+    for (const sessionId of this.pending.keys()) this.flush(sessionId);
+  }
+
+  public evict(sessionId: string): void {
+    this.flush(sessionId);
+    this.sessions.delete(sessionId);
   }
 
   public mutate<T>(
@@ -184,7 +223,7 @@ export class Store {
     const session = this.read(sessionId);
     if (!session) return undefined;
     const result = change(session);
-    if (commit(result)) saveSession(session);
+    if (commit(result)) this.markDirty(sessionId);
     return result;
   }
 
@@ -270,6 +309,7 @@ export class Store {
   }
 
   private addSession(session: ReviewSession): SessionInfo {
+    this.sessions.set(session.id, session);
     saveSession(session);
     return this.sessionInfo(session);
   }
@@ -322,7 +362,7 @@ export class Store {
       this.reloadFilePage(session, page, content, hash);
       events.push({ event: "reload", pageId: page.id });
     }
-    if (events.length) saveSession(session);
+    if (events.length) this.markDirty(sessionId);
     return events;
   }
 
@@ -368,7 +408,7 @@ export class Store {
 
   public reconcile(session: ReviewSession): Array<{ event: "reload" | "stale"; pageId: string }> {
     const events = this.reconcileSession(session);
-    if (events.length) saveSession(session);
+    if (events.length) this.markDirty(session.id);
     return events;
   }
 
@@ -637,11 +677,18 @@ export class Store {
   }
 
   public remove(sessionId: string): void {
+    const timer = this.pending.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.pending.delete(sessionId);
+    this.sessions.delete(sessionId);
     deleteSession(sessionId);
   }
 
   public pruneAll(): { sessions: number; files: number } {
     const sessions = this.count();
+    for (const timer of this.pending.values()) clearTimeout(timer);
+    this.pending.clear();
+    this.sessions.clear();
     const files = pruneSessionFiles();
     return { sessions, files };
   }

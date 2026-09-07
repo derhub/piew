@@ -11,6 +11,7 @@ type RuntimeSession = {
   sseClients: Set<ReadableStreamDefaultController>;
   pollers: Set<PollerRecord>;
   watchedSources: Set<string>;
+  lastActivity: number;
 };
 
 export type RuntimeCounts = {
@@ -24,14 +25,23 @@ export class SessionRuntime {
   private sessions = new Map<string, RuntimeSession>();
   private sourceSessions = new Map<string, Set<string>>();
 
-  constructor(private watcher: FileWatcher) {}
+  constructor(
+    private watcher: FileWatcher,
+    private onIdle: (sessionId: string) => void
+  ) {}
 
   private ensure(sessionId: string): RuntimeSession {
     let runtime = this.sessions.get(sessionId);
     if (!runtime) {
-      runtime = { sseClients: new Set(), pollers: new Set(), watchedSources: new Set() };
+      runtime = {
+        sseClients: new Set(),
+        pollers: new Set(),
+        watchedSources: new Set(),
+        lastActivity: 0,
+      };
       this.sessions.set(sessionId, runtime);
     }
+    runtime.lastActivity = Date.now();
     return runtime;
   }
 
@@ -51,6 +61,7 @@ export class SessionRuntime {
     if (runtime.sseClients.size || runtime.pollers.size) return;
     this.releaseSources(sessionId, runtime);
     this.sessions.delete(sessionId);
+    this.onIdle(sessionId);
   }
 
   private addSources(sessionId: string, runtime: RuntimeSession, session: ReviewSession): void {
@@ -92,6 +103,7 @@ export class SessionRuntime {
   public emit(sessionId: string, event: string, data: unknown): void {
     const runtime = this.sessions.get(sessionId);
     if (!runtime) return;
+    runtime.lastActivity = Date.now();
     const payload = new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     for (const client of runtime.sseClients) {
       try {
@@ -168,6 +180,16 @@ export class SessionRuntime {
 
   public releaseAll(): void {
     for (const sessionId of this.sessions.keys()) this.release(sessionId);
+  }
+
+  /** An abandoned tab never cancels its stream, so a live SSE client is the leak, not a reprieve. */
+  public sweepIdle(cutoff: number): string[] {
+    const idle: string[] = [];
+    for (const [sessionId, runtime] of this.sessions) {
+      if (!runtime.pollers.size && runtime.lastActivity < cutoff) idle.push(sessionId);
+    }
+    for (const sessionId of idle) this.release(sessionId);
+    return idle;
   }
 
   public counts(): RuntimeCounts {

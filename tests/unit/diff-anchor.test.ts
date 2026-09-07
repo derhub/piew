@@ -226,8 +226,16 @@ describe("diff annotation anchoring", () => {
   it("persists a diff page with its own bytes, not as a path to re-read", () => {
     const stateFile = path.join(process.env.PIEW_DIR!, "state-v4", "sessions", `${sessionId}.json`);
     const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const blob = path.join(
+      process.env.PIEW_DIR!,
+      "state-v4",
+      "blobs",
+      state.session.pages[pageId].diff.newContentHash
+    );
 
-    expect(state.session.pages[pageId].diff.newContent).toBeDefined();
+    expect(fs.readFileSync(blob, "utf8")).toBe(
+      "one\ntwo changed\nthree\nfour\nfive\nsix changed\n"
+    );
   });
 
   it("restores a diff page with its annotations in a fresh store", () => {

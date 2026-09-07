@@ -97,6 +97,8 @@ const withoutSent = <T extends { sent?: boolean }>({ sent, ...rest }: T) => rest
 export const MAX_IDLE_SECS = 255;
 /** Server-side long-poll ceiling, under MAX_IDLE_SECS. Longer client waits re-poll. */
 export const MAX_POLL_SECS = 240;
+const IDLE_SWEEP_MS = 5 * 60 * 1000;
+const SESSION_IDLE_MS = 30 * 60 * 1000;
 
 export class ReviewServer {
   public store = new Store();
@@ -105,6 +107,7 @@ export class ReviewServer {
   public token = crypto.randomBytes(16).toString("hex");
   public port = 4173;
   private serverInstance: any = null;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private staticDir: string;
 
   constructor(staticDir?: string) {
@@ -116,7 +119,7 @@ export class ReviewServer {
         }
       }
     });
-    this.runtime = new SessionRuntime(this.watcher);
+    this.runtime = new SessionRuntime(this.watcher, (sessionId) => this.store.evict(sessionId));
   }
 
   private emitToSession(sessionId: string, event: string, data: any) {
@@ -128,10 +131,30 @@ export class ReviewServer {
     return this.store.pruneAll();
   }
 
+  public sweepIdle(now = Date.now()): string[] {
+    const released = this.runtime.sweepIdle(now - SESSION_IDLE_MS);
+    for (const sessionId of released) this.store.evict(sessionId);
+    return released;
+  }
+
+  // A session nobody is attached to is nobody's working set: write it out and drop it.
+  private settle(sessionId: string): void {
+    this.store.flush(sessionId);
+    if (!this.runtime.hasSse(sessionId) && !this.runtime.hasPollers(sessionId)) {
+      this.store.evict(sessionId);
+    }
+  }
+
+  private settled(sessionId: string, response: Response): Response {
+    this.settle(sessionId);
+    return response;
+  }
+
   public resourceCounts() {
     const runtime = this.runtime.counts();
     return {
       sessions: runtime.sessions,
+      loaded: this.store.loadedCount(),
       watchers: this.watcher.count(),
       sse: runtime.sse,
       pollers: runtime.pollers,
@@ -178,7 +201,7 @@ export class ReviewServer {
     const { content, diff, ...meta } = page;
     return {
       ...meta,
-      ...(diff ? { status: diff.status } : {}),
+      ...(diff ? { status: diff.status, added: diff.added, removed: diff.removed } : {}),
     };
   }
 
@@ -335,6 +358,9 @@ export class ReviewServer {
 
     this.port = await findAvailablePort(this.port);
 
+    this.sweepTimer = setInterval(() => this.sweepIdle(), IDLE_SWEEP_MS);
+    this.sweepTimer.unref?.();
+
     this.serverInstance = Bun.serve({
       port: this.port,
       // Long polls hold a request open. Bun's default idleTimeout is 10s and closes
@@ -457,6 +483,7 @@ export class ReviewServer {
               }
             }
             const sessionInfo = this.store.createDiffSession(captured);
+            this.settle(sessionInfo.id);
             return Response.json(
               {
                 sessionId: sessionInfo.id,
@@ -493,6 +520,7 @@ export class ReviewServer {
           }
 
           const sessionInfo = this.store.createSession(filePaths);
+          this.settle(sessionInfo.id);
           return Response.json(
             {
               sessionId: sessionInfo.id,
@@ -535,18 +563,40 @@ export class ReviewServer {
             pages[pageId] = this.pageMeta(page);
           }
 
-          return Response.json(
-            {
-              id: session.id,
-              activePageId: session.activePageId,
-              reviewMap: session.reviewMap,
-              pages,
-              turns: session.turns,
-              tools: session.tools,
-              agentState: this.agentStateFor(sid, session.pendingBatch),
-            },
-            { headers: corsHeaders }
+          return this.settled(
+            sid,
+            Response.json(
+              {
+                id: session.id,
+                activePageId: session.activePageId,
+                reviewMap: session.reviewMap,
+                pages,
+                turns: session.turns,
+                tools: session.tools,
+                agentState: this.agentStateFor(sid, session.pendingBatch),
+              },
+              { headers: corsHeaders }
+            )
           );
+        }
+
+        if (sessionMatch && req.method === "DELETE") {
+          const sid = sessionMatch[1];
+          if (!this.store.read(sid)) {
+            return Response.json(
+              { error: "Session not found" },
+              { status: 404, headers: corsHeaders }
+            );
+          }
+          this.deliverBatch(sid, {
+            status: "closed",
+            pages: [],
+            sent_at: new Date().toISOString(),
+          });
+          this.emitToSession(sid, "closed", {});
+          this.runtime.release(sid);
+          this.store.remove(sid);
+          return Response.json({ closed: true }, { headers: corsHeaders });
         }
 
         const mapMatch = route.match(/^\/api\/session\/([a-zA-Z0-9_]+)\/map$/);
@@ -623,35 +673,47 @@ export class ReviewServer {
           const [, sid, pageId] = pageMatch;
           const page = this.store.getPage(sid, pageId);
           if (!page)
-            return Response.json(
-              {
-                code: "page-missing",
-                message: "Page not found",
-                retryable: false,
-              },
-              { status: 404, headers: corsHeaders }
+            return this.settled(
+              sid,
+              Response.json(
+                {
+                  code: "page-missing",
+                  message: "Page not found",
+                  retryable: false,
+                },
+                { status: 404, headers: corsHeaders }
+              )
             );
 
           if (page.kind === "diff") {
             if (!page.diff) {
-              return Response.json(
-                {
-                  code: "page-corrupt",
-                  message: `Captured diff is missing for ${page.filename}`,
-                  retryable: false,
-                },
-                { status: 500, headers: corsHeaders }
+              return this.settled(
+                sid,
+                Response.json(
+                  {
+                    code: "page-corrupt",
+                    message: `Captured diff is missing for ${page.filename}`,
+                    retryable: false,
+                  },
+                  { status: 500, headers: corsHeaders }
+                )
               );
             }
-            return Response.json(
-              { id: page.id, kind: page.kind, diff: page.diff, hash: page.hash },
-              { headers: corsHeaders }
+            return this.settled(
+              sid,
+              Response.json(
+                { id: page.id, kind: page.kind, diff: page.diff, hash: page.hash },
+                { headers: corsHeaders }
+              )
             );
           }
 
-          return Response.json(
-            { id: page.id, kind: page.kind, content: page.content, hash: page.hash },
-            { headers: corsHeaders }
+          return this.settled(
+            sid,
+            Response.json(
+              { id: page.id, kind: page.kind, content: page.content, hash: page.hash },
+              { headers: corsHeaders }
+            )
           );
         }
 
@@ -696,6 +758,30 @@ export class ReviewServer {
           this.store.refreshDiff(sid, pageId, diff);
           this.emitToSession(sid, "refresh", { pageId });
           return Response.json({ ok: true }, { headers: corsHeaders });
+        }
+
+        const viewedMatch = route.match(
+          /^\/api\/session\/([a-zA-Z0-9_]+)\/page\/([a-zA-Z0-9_]+)\/viewed$/
+        );
+        if (viewedMatch && req.method === "POST") {
+          const [, sid, pageId] = viewedMatch;
+          const body = (await req.json().catch(() => ({}))) as { viewed?: unknown };
+          if (typeof body.viewed !== "boolean") {
+            return Response.json(
+              { error: "viewed must be a boolean" },
+              { status: 400, headers: corsHeaders }
+            );
+          }
+
+          const page = this.store.setViewed(sid, pageId, body.viewed);
+          if (!page)
+            return Response.json(
+              { error: "Page not found" },
+              { status: 404, headers: corsHeaders }
+            );
+
+          this.emitToSession(sid, "refresh", { pageId });
+          return Response.json({ page: this.pageMeta(page) }, { headers: corsHeaders });
         }
 
         const commentMatch = route.match(
@@ -1161,6 +1247,7 @@ export class ReviewServer {
               { status: 400, headers: corsHeaders }
             );
           }
+          this.settle(sessionId);
           if (result.delivered) this.deliverBatch(sessionId, result.batch);
           this.broadcastAgentState(sessionId, result.pending);
           return Response.json({ ok: true, delivered: result.delivered }, { headers: corsHeaders });
@@ -1262,6 +1349,7 @@ export class ReviewServer {
               { status: 404, headers: corsHeaders }
             );
           }
+          this.settle(sessionId);
           for (const pageId of result.pageIds) {
             this.emitToSession(sessionId, "refresh", { pageId });
           }
@@ -1324,6 +1412,7 @@ export class ReviewServer {
                 { status: 404, headers: corsHeaders }
               );
             }
+            this.settle(sessionId);
             this.broadcastAgentState(sessionId, { batch, delivered: true });
             return Response.json(batch, { headers: corsHeaders });
           }
@@ -1331,6 +1420,7 @@ export class ReviewServer {
           // Long poll. Capped under Bun's idleTimeout so the wait always ends in a
           // response; a client wanting longer re-polls.
           const waitSecs = timeoutSecs > 0 ? Math.min(timeoutSecs, MAX_POLL_SECS) : 0;
+          this.store.flush(sessionId);
 
           return new Promise<Response>((resolve) => {
             let settled = false;
@@ -1398,18 +1488,21 @@ export class ReviewServer {
             unsentEdits += p.edits.filter((e) => !e.sent).length;
           }
 
-          return Response.json(
-            {
-              status: pending ? "feedback-waiting" : "idle",
-              feedback_waiting: !!pending,
-              agent_listening: listening,
-              server_running: true,
-              unsent: {
-                comments: unsentComments,
-                edits: unsentEdits,
+          return this.settled(
+            sessionId,
+            Response.json(
+              {
+                status: pending ? "feedback-waiting" : "idle",
+                feedback_waiting: !!pending,
+                agent_listening: listening,
+                server_running: true,
+                unsent: {
+                  comments: unsentComments,
+                  edits: unsentEdits,
+                },
               },
-            },
-            { headers: corsHeaders }
+              { headers: corsHeaders }
+            )
           );
         }
 
@@ -1430,7 +1523,6 @@ export class ReviewServer {
       },
     });
 
-    // Write server.json
     fs.writeFileSync(
       serverRecordPath(),
       JSON.stringify(
@@ -1451,6 +1543,11 @@ export class ReviewServer {
   }
 
   public stop() {
+    this.store.flushAll();
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
     this.runtime.releaseAll();
     if (this.serverInstance) {
       this.serverInstance.stop();

@@ -39,7 +39,9 @@ active poll, and `server_running` distinguishes live state from the disk fallbac
 
 A daemon restart restores pages, comments, the transcript, and the exact diff bytes
 that were originally reviewed. Polling an unacknowledged batch returns it again;
-`--ack` clears only the batch already delivered to the agent.
+`--ack` clears only the batch already delivered to the agent. Everything the agent was
+told is on disk before it hears it; a comment or edit made in the browser in the last
+250 ms before the daemon is killed outright is not restored.
 
 ## Tool packages
 

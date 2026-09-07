@@ -2,12 +2,27 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ensureStateDir, stateDataPath, stateDir } from "../cli/paths";
-import type { ReviewSession } from "../lib/types";
+import type { DiffFile, PageData, ReviewSession } from "../lib/types";
+import { atomicWrite, blobsDir, collectBlobs, readBlob, writeBlob } from "./blob-files";
 import { deleteToolArtifacts, pruneToolArtifacts } from "./tool-files";
 
-export interface StoredSessionV4 {
-  schemaVersion: 4;
-  session: ReviewSession;
+type StoredDiff = Omit<DiffFile, "oldContent" | "newContent"> & {
+  oldContentHash?: string;
+  newContentHash?: string;
+};
+
+type StoredPage = Omit<PageData, "content" | "diff"> & {
+  contentHash: string;
+  diff?: StoredDiff;
+};
+
+type StoredSession = Omit<ReviewSession, "pages"> & {
+  pages: Record<string, StoredPage>;
+};
+
+export interface StoredSessionV5 {
+  schemaVersion: 5;
+  session: StoredSession;
 }
 
 export interface SessionSummary {
@@ -38,6 +53,12 @@ function ensureSessionDirs(): void {
 
 function sessionPath(sessionId: string): string {
   return path.join(sessionsDir(), `${sessionId}.json`);
+}
+
+interface ListedSession {
+  id: string;
+  toolIds: string[];
+  summary?: SessionSummary;
 }
 
 function isJsonValue(value: unknown): boolean {
@@ -160,19 +181,61 @@ function quarantine(file: string, reason: unknown, sessionId?: string): void {
   console.error(`Quarantined invalid session ${path.basename(file)}: ${String(reason)}`);
 }
 
-function readStoredSession(file: string, name: string): ReviewSession | undefined {
-  let stored: Partial<StoredSessionV4> | undefined;
+function dehydrate(session: ReviewSession): StoredSession {
+  const pages: Record<string, StoredPage> = {};
+  for (const [pageId, page] of Object.entries(session.pages)) {
+    const { content, diff, ...rest } = page;
+    const stored: StoredPage = { ...rest, contentHash: writeBlob(content) };
+    if (diff) {
+      const { oldContent, newContent, ...diffRest } = diff;
+      stored.diff = { ...diffRest };
+      if (oldContent !== undefined) stored.diff.oldContentHash = writeBlob(oldContent);
+      if (newContent !== undefined) stored.diff.newContentHash = writeBlob(newContent);
+    }
+    pages[pageId] = stored;
+  }
+  return { ...session, pages };
+}
+
+function hydrate(session: StoredSession, pageBytes: (hash: string) => string): ReviewSession {
+  const pages: Record<string, PageData> = {};
+  for (const [pageId, stored] of Object.entries(session.pages)) {
+    const { contentHash, diff, ...rest } = stored;
+    const page: PageData = { ...rest, content: pageBytes(contentHash) };
+    if (diff) {
+      const { oldContentHash, newContentHash, ...diffRest } = diff;
+      page.diff = { ...diffRest };
+      if (oldContentHash !== undefined) page.diff.oldContent = pageBytes(oldContentHash);
+      if (newContentHash !== undefined) page.diff.newContent = pageBytes(newContentHash);
+    }
+    pages[pageId] = page;
+  }
+  return { ...session, pages };
+}
+
+// A v4 record carries its bytes inline, so only a v5 record consults pageBytes: a
+// summary can read one with no blob at all and still migrate a v4 file correctly.
+function readStoredSession(
+  file: string,
+  name: string,
+  pageBytes: (hash: string) => string = readBlob
+): ReviewSession | undefined {
+  let stored: { schemaVersion?: number; session?: ReviewSession & StoredSession } | undefined;
   try {
-    stored = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<StoredSessionV4>;
-    if (stored.schemaVersion !== 4) {
+    stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    const version = stored?.schemaVersion;
+    if (version !== 4 && version !== 5) {
       console.error(`Ignored session schema in ${name}`);
       return undefined;
     }
-    if (stored.session && typeof stored.session === "object") stored.session.tools ??= {};
-    if (!isReviewSession(stored.session) || name !== `${stored.session.id}.json`) {
-      throw new Error("invalid schema-v4 session record");
+    const raw = stored?.session;
+    if (raw && typeof raw === "object") raw.tools ??= {};
+    const session = version === 5 && raw ? hydrate(raw, pageBytes) : raw;
+    if (!isReviewSession(session) || name !== `${session.id}.json`) {
+      throw new Error(`invalid schema-v${version} session record`);
     }
-    return stored.session;
+    if (version === 4) saveSession(session);
+    return session;
   } catch (error) {
     const sessionId =
       stored?.session && typeof stored.session === "object" && typeof stored.session.id === "string"
@@ -191,75 +254,88 @@ export function readSession(sessionId: string): ReviewSession | undefined {
   return readStoredSession(file, path.basename(file));
 }
 
-export function listSessionSummaries(): SessionSummary[] {
+function summarize(session: ReviewSession): ListedSession {
+  const files = session.reviewMap.items
+    .map((item) => session.pages[item.pageId]?.filename)
+    .filter((entry): entry is string => !!entry);
+  return {
+    id: session.id,
+    toolIds: Object.keys(session.tools),
+    summary: files.length
+      ? {
+          id: session.id,
+          lastSeen: session.lastSeen,
+          title: session.reviewMap.title,
+          kind: session.pages[session.activePageId]?.kind ?? "markdown",
+          files,
+        }
+      : undefined,
+  };
+}
+
+export function listSessionSummaries(
+  loaded: (sessionId: string) => ReviewSession | undefined
+): SessionSummary[] {
   ensureSessionDirs();
   const summaries: SessionSummary[] = [];
   const tools = new Map<string, string[]>();
 
   for (const name of fs.readdirSync(sessionsDir())) {
     if (!name.endsWith(".json")) continue;
-    const session = readStoredSession(path.join(sessionsDir(), name), name);
+    const session =
+      loaded(name.slice(0, -".json".length)) ??
+      readStoredSession(path.join(sessionsDir(), name), name, () => "");
     if (!session) continue;
-    tools.set(session.id, Object.keys(session.tools));
-    const files = session.reviewMap.items
-      .map((item) => session.pages[item.pageId]?.filename)
-      .filter((file): file is string => !!file);
-    if (!files.length) continue;
-    summaries.push({
-      id: session.id,
-      lastSeen: session.lastSeen,
-      title: session.reviewMap.title,
-      kind: session.pages[session.activePageId]?.kind ?? "markdown",
-      files,
-    });
+    const listed = summarize(session);
+    tools.set(listed.id, listed.toolIds);
+    if (listed.summary) summaries.push(listed.summary);
   }
 
   pruneToolArtifacts(tools);
   return summaries.sort((a, b) => b.lastSeen - a.lastSeen);
 }
 
-export function countSessions(): number {
-  return listSessionSummaries().length;
-}
-
 export function saveSession(session: ReviewSession): void {
   ensureSessionDirs();
-  const target = sessionPath(session.id);
-  const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  let descriptor: number | undefined;
-  try {
-    descriptor = fs.openSync(temporary, "w");
-    fs.writeFileSync(
-      descriptor,
-      JSON.stringify({ schemaVersion: 4, session } satisfies StoredSessionV4, null, 2),
-      "utf8"
-    );
-    fs.fsyncSync(descriptor);
-    fs.closeSync(descriptor);
-    descriptor = undefined;
-    fs.renameSync(temporary, target);
-    if (process.platform !== "win32") {
-      const directory = fs.openSync(sessionsDir(), "r");
-      try {
-        fs.fsyncSync(directory);
-      } finally {
-        fs.closeSync(directory);
+  atomicWrite(
+    sessionsDir(),
+    sessionPath(session.id),
+    JSON.stringify(
+      { schemaVersion: 5, session: dehydrate(session) } satisfies StoredSessionV5,
+      null,
+      2
+    )
+  );
+}
+
+function referencedBlobs(): Set<string> {
+  const live = new Set<string>();
+  for (const name of fs.readdirSync(sessionsDir())) {
+    if (!name.endsWith(".json")) continue;
+    let stored: Partial<StoredSessionV5>;
+    try {
+      stored = JSON.parse(fs.readFileSync(path.join(sessionsDir(), name), "utf8"));
+    } catch {
+      continue;
+    }
+    for (const page of Object.values(stored.session?.pages ?? {})) {
+      for (const hash of [page.contentHash, page.diff?.oldContentHash, page.diff?.newContentHash]) {
+        if (typeof hash === "string") live.add(hash);
       }
     }
-  } catch (error) {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
-    fs.rmSync(temporary, { force: true });
-    throw error;
   }
+  return live;
 }
 
 export function deleteSession(sessionId: string): void {
   fs.rmSync(sessionPath(sessionId), { force: true });
   deleteToolArtifacts(sessionId);
+  collectBlobs(referencedBlobs());
 }
 
 export function pruneSessionFiles(): number {
   ensureSessionDirs();
+  fs.rmSync(blobsDir(), { recursive: true, force: true });
   let removed = 0;
   for (const directory of [sessionsDir(), quarantineDir()]) {
     for (const name of fs.readdirSync(directory)) {

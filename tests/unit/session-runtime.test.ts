@@ -17,7 +17,7 @@ describe("SessionRuntime", () => {
     file = path.join(directory, "review.md");
     fs.writeFileSync(file, "# Review\n");
     watcher = new FileWatcher(() => {});
-    runtime = new SessionRuntime(watcher);
+    runtime = new SessionRuntime(watcher, () => {});
   });
 
   afterEach(() => {
@@ -103,7 +103,7 @@ describe("SessionRuntime", () => {
       },
       unwatch() {},
     } as unknown as FileWatcher;
-    const retryingRuntime = new SessionRuntime(retryingWatcher);
+    const retryingRuntime = new SessionRuntime(retryingWatcher, () => {});
 
     retryingRuntime.connect("s_first", client(), session("s_first"));
     expect(retryingRuntime.sessionsForSource(file)).toEqual([]);
@@ -112,5 +112,62 @@ describe("SessionRuntime", () => {
     expect(retryingRuntime.sessionsForSource(file)).toEqual(["s_second"]);
     expect(attempts).toBe(2);
     retryingRuntime.releaseAll();
+  });
+
+  it("releases the runtime entry and source watchers of a session idle past the cutoff", () => {
+    runtime.connect("s_first", client(), session("s_first"));
+
+    const released = runtime.sweepIdle(Date.now() + 1);
+
+    expect({ released, runtime: runtime.counts(), watchers: watcher.count() }).toEqual({
+      released: ["s_first"],
+      runtime: { sessions: 0, sse: 0, pollers: 0, timers: 0 },
+      watchers: 0,
+    });
+  });
+
+  it("keeps the runtime entry and source watchers of a session active since the cutoff", () => {
+    runtime.connect("s_first", client(), session("s_first"));
+
+    const released = runtime.sweepIdle(Date.now() - 60_000);
+
+    expect({ released, runtime: runtime.counts(), watchers: watcher.count() }).toEqual({
+      released: [],
+      runtime: { sessions: 1, sse: 1, pollers: 0, timers: 0 },
+      watchers: 1,
+    });
+  });
+
+  it("keeps a session whose last event was recent even when its connect was stale", async () => {
+    runtime.connect("s_first", client(), session("s_first"));
+    await Bun.sleep(2);
+    const cutoff = Date.now();
+
+    runtime.emit("s_first", "reload", { pageId: "p_1" });
+    const released = runtime.sweepIdle(cutoff);
+
+    expect({ released, runtime: runtime.counts(), watchers: watcher.count() }).toEqual({
+      released: [],
+      runtime: { sessions: 1, sse: 1, pollers: 0, timers: 0 },
+      watchers: 1,
+    });
+  });
+
+  it("leaves a waiting poller unresolved when its session is idle past the cutoff", () => {
+    let resolved: unknown = "unresolved";
+    runtime.addPoller("s_first", {
+      resolve: (batch) => {
+        resolved = batch;
+      },
+      timer: null,
+    });
+
+    const released = runtime.sweepIdle(Date.now() + 1);
+
+    expect({ released, resolved, runtime: runtime.counts() }).toEqual({
+      released: [],
+      resolved: "unresolved",
+      runtime: { sessions: 1, sse: 0, pollers: 1, timers: 0 },
+    });
   });
 });
