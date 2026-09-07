@@ -242,7 +242,7 @@ export async function statusCommand(sessionId: string) {
     const stored = JSON.parse(
       fs.readFileSync(path.join(stateDir(), "state-v4", "sessions", `${sessionId}.json`), "utf8")
     );
-    if (stored.schemaVersion === 4) session = stored.session;
+    if (stored.schemaVersion === 5) session = stored.session;
   } catch {}
 
   const pending = session?.pendingBatch;
@@ -262,6 +262,19 @@ export async function statusCommand(sessionId: string) {
     },
   };
   writeJson(payload);
+}
+
+export async function closeCommand(sessionId: string): Promise<void> {
+  const daemon = await ensureDaemonRunning();
+  const response = await fetch(`http://127.0.0.1:${daemon.port}/api/session/${sessionId}`, {
+    method: "DELETE",
+  });
+  const body = (await response.json().catch(() => ({}))) as { error?: string; closed?: boolean };
+  if (!response.ok) {
+    console.error(`Close failed: ${body.error || response.statusText}`);
+    process.exit(1);
+  }
+  writeJson({ sessionId, closed: true });
 }
 
 export async function pruneCommand(): Promise<void> {

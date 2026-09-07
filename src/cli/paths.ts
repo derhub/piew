@@ -26,12 +26,13 @@ export function ensureStateDir(): string {
   return dir;
 }
 
+// Per protocol: a CLI must not find, and so stop, a daemon holding other sessions' SSE.
 export function serverRecordPath(): string {
-  return path.join(stateDir(), "server.json");
+  return path.join(stateDir(), `server-v${SERVER_PROTOCOL}.json`);
 }
 
 export function daemonLockPath(): string {
-  return path.join(stateDir(), "daemon.lock");
+  return path.join(stateDir(), `daemon-v${SERVER_PROTOCOL}.lock`);
 }
 
 export function daemonLogPath(): string {

@@ -21,7 +21,7 @@ echo '{
 }' | piew map s_123
 ```
 
-Paths may contain five safe slash-separated segments. Replacement is atomic.
+Paths may contain up to 32 safe slash-separated segments and 512 characters. Replacement is atomic.
 Missing sources, unsafe or duplicate paths, duplicate pages, and removal of a page
 with unresolved feedback reject the whole update.
 
@@ -39,7 +39,18 @@ active poll, and `server_running` distinguishes live state from the disk fallbac
 
 A daemon restart restores pages, comments, the transcript, and the exact diff bytes
 that were originally reviewed. Polling an unacknowledged batch returns it again;
-`--ack` clears only the batch already delivered to the agent.
+`--ack` clears only the batch already delivered to the agent. Everything the agent was
+told is on disk before it hears it; a comment or edit made in the browser in the last
+250 ms before the daemon is killed outright is not restored.
+
+Close a session and delete its stored state:
+
+```sh
+piew close s_123
+```
+
+A poll waiting on a closed session resolves once with `status: "closed"` instead of
+timing out.
 
 ## Tool packages
 

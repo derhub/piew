@@ -4,7 +4,6 @@ import { createRoute } from "@tanstack/react-router";
 import { Route as rootRoute } from "./__root";
 import { DocumentSidebar } from "~/components/DocumentSidebar";
 import { TableOfContents } from "~/components/TableOfContents";
-import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { ImageViewer, isImageUrl } from "~/components/ImageViewer";
 import { FeedbackChat } from "~/components/FeedbackChat";
 import { ToolFrame, type ToolAction } from "~/components/ToolFrame";
@@ -29,6 +28,11 @@ import type {
 
 const CodeDiffViewer = React.lazy(() =>
   import("~/components/CodeDiffViewer").then((module) => ({ default: module.CodeDiffViewer }))
+);
+
+// Markdown drags mermaid and katex behind it; a diff-only review never renders one.
+const MarkdownViewer = React.lazy(() =>
+  import("~/components/MarkdownViewer").then((module) => ({ default: module.MarkdownViewer }))
 );
 
 export const Route = createRoute({
@@ -60,6 +64,19 @@ function savedLayout(): Record<string, number> | undefined {
   } catch {
     return undefined;
   }
+}
+
+// Every refresh re-fetches the whole session, so an unchanged page has to keep its
+// object identity or the memos hanging off its comments and edits recompute for
+// byte-identical data.
+function mergeSession(previous: SessionState | null, next: SessionState): SessionState {
+  if (!previous) return next;
+  if (JSON.stringify(previous) === JSON.stringify(next)) return previous;
+  for (const [id, page] of Object.entries(next.pages)) {
+    const kept = previous.pages[id];
+    if (kept && JSON.stringify(kept) === JSON.stringify(page)) next.pages[id] = kept;
+  }
+  return next;
 }
 
 type PageContentState =
@@ -236,7 +253,7 @@ function ReviewSessionComponent() {
       if (!res.ok) throw new Error(`Failed to load session: ${res.statusText}`);
       const data: SessionState = await res.json();
       if (request !== sessionRequestRef.current) return;
-      setSession(data);
+      setSession((previous) => mergeSession(previous, data));
       setActiveKey((prev) =>
         prev && data.pages[prev] ? prev : data.activePageId || data.reviewMap.items[0]?.pageId || ""
       );
@@ -254,6 +271,9 @@ function ReviewSessionComponent() {
   const [contentRevision, setContentRevision] = React.useState(0);
   const [eventSessionId, setEventSessionId] = React.useState("");
   const activeContentRef = React.useRef<PageContentState | null>(null);
+  // Every mutation the server accepts comes back as a refresh frame, so reloading
+  // here as well would fetch the same session twice for one comment.
+  const streamingRef = React.useRef(false);
 
   React.useEffect(() => {
     activeContentRef.current = activeContentState;
@@ -324,43 +344,76 @@ function ReviewSessionComponent() {
     void loadSession();
   }, [loadSession]);
 
+  // A backgrounded tab holds a server-side stream open for nothing, so it hands the
+  // connection back and takes a fresh one when it returns; the open handler already
+  // reconciles whatever changed while it was away.
   React.useEffect(() => {
     if (eventSessionId !== sessionId) return;
-    const eventSource = new EventSource(`/events?session=${sessionId}`);
-    const refresh = () => void loadSession();
-    eventSource.addEventListener("open", () => {
-      void loadSession().then((data) => {
-        const current = activeContentRef.current;
-        if (
-          data &&
-          current?.status === "ready" &&
-          data.pages[current.pageId]?.hash !== current.body.hash
-        ) {
-          setContentRevision((revision) => revision + 1);
+    let eventSource: EventSource | null = null;
+    let done = false;
+
+    const close = () => {
+      eventSource?.close();
+      eventSource = null;
+      streamingRef.current = false;
+    };
+
+    const open = () => {
+      if (done || eventSource) return;
+      const stream = new EventSource(`/events?session=${sessionId}`);
+      eventSource = stream;
+      const refresh = () => void loadSession();
+      stream.addEventListener("open", () => {
+        streamingRef.current = true;
+        void loadSession().then((data) => {
+          const current = activeContentRef.current;
+          if (
+            data &&
+            current?.status === "ready" &&
+            data.pages[current.pageId]?.hash !== current.body.hash
+          ) {
+            setContentRevision((revision) => revision + 1);
+          }
+        });
+      });
+      stream.addEventListener("refresh", refresh);
+      stream.addEventListener("stale", refresh);
+      stream.addEventListener("reload", (event) => {
+        try {
+          const { pageId } = JSON.parse((event as MessageEvent).data);
+          if (pageId) setContentRevision((revision) => revision + 1);
+        } catch {
+          /* malformed frame */
+        }
+        refresh();
+      });
+      stream.addEventListener("agent", (event) => {
+        try {
+          const { state } = JSON.parse((event as MessageEvent).data);
+          setSession((prev) => (prev ? { ...prev, agentState: state } : prev));
+        } catch {
+          /* malformed frame */
         }
       });
-    });
-    eventSource.addEventListener("refresh", refresh);
-    eventSource.addEventListener("stale", refresh);
-    eventSource.addEventListener("reload", (event) => {
-      try {
-        const { pageId } = JSON.parse((event as MessageEvent).data);
-        if (pageId) setContentRevision((revision) => revision + 1);
-      } catch {
-        /* malformed frame */
-      }
-      refresh();
-    });
-    eventSource.addEventListener("agent", (event) => {
-      try {
-        const { state } = JSON.parse((event as MessageEvent).data);
-        setSession((prev) => (prev ? { ...prev, agentState: state } : prev));
-      } catch {
-        /* malformed frame */
-      }
-    });
+      stream.addEventListener("closed", () => {
+        done = true;
+        close();
+        sessionRequestRef.current++;
+        setError("Session closed");
+      });
+    };
 
-    return () => eventSource.close();
+    const onVisibility = () => (document.hidden ? close() : open());
+    open();
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", close);
+
+    return () => {
+      done = true;
+      close();
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", close);
+    };
   }, [eventSessionId, sessionId, loadSession]);
 
   const activePage = session?.pages[activeKey];
@@ -373,6 +426,9 @@ function ReviewSessionComponent() {
   const activeContent =
     activePageContentState?.status === "ready" ? activePageContentState.body : undefined;
   const activeMapPath = session?.reviewMap.items.find((item) => item.pageId === activeKey)?.path;
+  // A diff page's filename is its repo-relative path; every other page carries a bare name,
+  // so the map path is the only context line those have.
+  const activeSubtitle = activePage?.filename.includes("/") ? activePage.filename : activeMapPath;
   const explorerRef = React.useRef<PanelImperativeHandle | null>(null);
   const [explorerCollapsed, setExplorerCollapsed] = React.useState(false);
   const [toolbarSlot, setToolbarSlot] = React.useState<HTMLDivElement | null>(null);
@@ -411,7 +467,7 @@ function ReviewSessionComponent() {
         headers: { "Content-Type": "application/json" },
         ...init,
       });
-      if (res.ok) await loadSession();
+      if (res.ok && !streamingRef.current) await loadSession();
       return res;
     },
     [loadSession]
@@ -456,6 +512,29 @@ function ReviewSessionComponent() {
     },
     [call, sessionId]
   );
+
+  // The box carries the click, not the server answer: a second click landing before
+  // the refresh frame would otherwise read the old value and send the same state twice.
+  const toggleViewed = React.useCallback(() => {
+    const page = session?.pages[activeKey];
+    if (!session || page?.kind !== "diff") return false;
+    const viewed = !page.viewed;
+    setSession((prev) =>
+      prev ? { ...prev, pages: { ...prev.pages, [activeKey]: { ...page, viewed } } } : prev
+    );
+    void call(`/api/session/${sessionId}/page/${activeKey}/viewed`, {
+      method: "POST",
+      body: JSON.stringify({ viewed }),
+    });
+    if (!viewed) return;
+
+    const items = session.reviewMap.items;
+    const at = items.findIndex((item) => item.pageId === activeKey);
+    const next = [...items.slice(at + 1), ...items.slice(0, at)].find(
+      (item) => !session.pages[item.pageId]?.viewed
+    );
+    if (next) selectPage(next.pageId);
+  }, [session, activeKey, call, sessionId, selectPage]);
 
   const updateComment = React.useCallback(
     (pageId: string, commentId: string, feedback: string) => {
@@ -672,6 +751,7 @@ function ReviewSessionComponent() {
     e: () => compose("edit"),
     f: toggleFeedback,
     r: answerQuestion,
+    v: toggleViewed,
     "?": () => setShortcutsOpen((open) => !open),
     Escape: () => {
       // Nothing of ours open means Escape belongs to whatever else is listening.
@@ -769,11 +849,28 @@ function ReviewSessionComponent() {
             <PanelLeft />
           </Button>
           <div className="min-w-0 flex-1 leading-tight">
-            <div className="truncate text-sm font-medium">{activePage?.filename}</div>
-            <div className="text-muted-foreground truncate text-[11px]" title={activeMapPath}>
-              {activeMapPath}
+            <div className="truncate text-sm font-medium">
+              {activePage?.filename.split("/").pop()}
+            </div>
+            <div className="text-muted-foreground truncate text-[11px]" title={activeSubtitle}>
+              {activeSubtitle}
             </div>
           </div>
+
+          {activePage?.kind === "diff" && (
+            <label
+              className="text-muted-foreground hover:text-foreground flex shrink-0 cursor-pointer items-center gap-1.5 text-xs select-none"
+              title="Mark this file viewed (v)"
+            >
+              <input
+                type="checkbox"
+                className="accent-primary size-3.5"
+                checked={!!activePage.viewed}
+                onChange={toggleViewed}
+              />
+              Viewed
+            </label>
+          )}
 
           {activePage?.stale && (
             <Button variant="outline" size="sm" onClick={handleRefreshPage}>
@@ -793,41 +890,43 @@ function ReviewSessionComponent() {
           />
         )}
 
+        {/* One boundary for the whole document row: the outline reads the headings the
+            viewer renders, so it must not mount a chunk load ahead of them. */}
         <div className="flex flex-1 items-start">
-          {/* Scroll past the end: the last lines clear the floating action bar,
+          <React.Suspense fallback={null}>
+            {/* Scroll past the end: the last lines clear the floating action bar,
               and any line can be brought to the middle of the viewport. */}
-          <main className={`min-w-0 flex-1 ${activePageIsImage ? "" : "pb-[60vh]"}`}>
-            {activePage && !activePageIsImage && activePageContentState?.status === "error" ? (
-              <div role="alert" className="flex flex-col items-start gap-3 p-8 text-sm">
-                <p className="text-destructive font-medium">
-                  Could not load {activePage.filename}: {activePageContentState.message}
-                </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setContentRevision((revision) => revision + 1)}
-                >
-                  Retry
-                </Button>
-              </div>
-            ) : activePage && !activePageIsImage && activePageContentState?.status !== "ready" ? (
-              <div className="text-muted-foreground p-8 text-sm">
-                Loading {activePage.filename}...
-              </div>
-            ) : activePage && activePageIsImage ? (
-              <ImageViewer
-                items={[
-                  {
-                    src: `/api/session/${sessionId}/page/${activePage.id}/media?path=${encodeURIComponent(activePage.filename)}`,
-                    alt: activePage.filename,
-                  },
-                ]}
-                index={0}
-                mode="page"
-                onIndexChange={() => undefined}
-              />
-            ) : activePage && activePage.kind !== "markdown" ? (
-              <React.Suspense fallback={null}>
+            <main className={`min-w-0 flex-1 ${activePageIsImage ? "" : "pb-[60vh]"}`}>
+              {activePage && !activePageIsImage && activePageContentState?.status === "error" ? (
+                <div role="alert" className="flex flex-col items-start gap-3 p-8 text-sm">
+                  <p className="text-destructive font-medium">
+                    Could not load {activePage.filename}: {activePageContentState.message}
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setContentRevision((revision) => revision + 1)}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              ) : activePage && !activePageIsImage && activePageContentState?.status !== "ready" ? (
+                <div className="text-muted-foreground p-8 text-sm">
+                  Loading {activePage.filename}...
+                </div>
+              ) : activePage && activePageIsImage ? (
+                <ImageViewer
+                  items={[
+                    {
+                      src: `/api/session/${sessionId}/page/${activePage.id}/media?path=${encodeURIComponent(activePage.filename)}`,
+                      alt: activePage.filename,
+                    },
+                  ]}
+                  index={0}
+                  mode="page"
+                  onIndexChange={() => undefined}
+                />
+              ) : activePage && activePage.kind !== "markdown" ? (
                 <CodeDiffViewer
                   page={activePage}
                   diff={activeContent?.diff}
@@ -846,42 +945,42 @@ function ReviewSessionComponent() {
                   toolbarSlot={toolbarSlot}
                   viewerRef={viewerRef}
                 />
-              </React.Suspense>
-            ) : activePage ? (
-              <MarkdownViewer
-                content={activeContent?.content ?? ""}
-                comments={activePage.comments}
-                edits={activePage.edits}
-                onAddComment={handleAddComment}
-                onAddEdit={handleAddEdit}
-                onDeleteComment={handleDeleteComment}
-                onDeleteEdit={handleDeleteEdit}
-                onUpdateComment={handleUpdateComment}
-                onUpdateEdit={handleUpdateEdit}
-                onNavigateLink={handleNavigateLink}
-                mediaBaseUrl={`/api/session/${sessionId}/page/${activePage.id}/media`}
-                zoom={zoom}
-                viewerRef={viewerRef}
-              />
-            ) : (
-              <div className="text-muted-foreground flex h-full items-center justify-center p-12 text-sm">
-                Select a document from the sidebar.
-              </div>
+              ) : activePage ? (
+                <MarkdownViewer
+                  content={activeContent?.content ?? ""}
+                  comments={activePage.comments}
+                  edits={activePage.edits}
+                  onAddComment={handleAddComment}
+                  onAddEdit={handleAddEdit}
+                  onDeleteComment={handleDeleteComment}
+                  onDeleteEdit={handleDeleteEdit}
+                  onUpdateComment={handleUpdateComment}
+                  onUpdateEdit={handleUpdateEdit}
+                  onNavigateLink={handleNavigateLink}
+                  mediaBaseUrl={`/api/session/${sessionId}/page/${activePage.id}/media`}
+                  zoom={zoom}
+                  viewerRef={viewerRef}
+                />
+              ) : (
+                <div className="text-muted-foreground flex h-full items-center justify-center p-12 text-sm">
+                  Select a document from the sidebar.
+                </div>
+              )}
+
+              {anchoredTools.map((tool) => (
+                <AnchoredToolSurface
+                  key={tool.id}
+                  sessionId={sessionId}
+                  interaction={tool}
+                  onAction={(action) => handleToolAction(tool.id, action)}
+                />
+              ))}
+            </main>
+
+            {activePage?.kind === "markdown" && (
+              <TableOfContents key={activeKey} markdown={activeContent?.content ?? ""} />
             )}
-
-            {anchoredTools.map((tool) => (
-              <AnchoredToolSurface
-                key={tool.id}
-                sessionId={sessionId}
-                interaction={tool}
-                onAction={(action) => handleToolAction(tool.id, action)}
-              />
-            ))}
-          </main>
-
-          {activePage?.kind === "markdown" && (
-            <TableOfContents key={activeKey} markdown={activeContent?.content ?? ""} />
-          )}
+          </React.Suspense>
         </div>
 
         <ActionBar

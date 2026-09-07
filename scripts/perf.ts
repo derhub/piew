@@ -440,7 +440,7 @@ async function sampleWorkload(
   await waitForRenderedReview(page);
 
   await context.close();
-  server.cleanupExpiredSessions(Number.MAX_SAFE_INTEGER);
+  server.sweepIdle(Number.MAX_SAFE_INTEGER);
   const serverHeapAfter = collectServerHeap();
 
   return {
@@ -497,7 +497,7 @@ async function record(runs: number, output: string): Promise<void> {
           { cause: error }
         );
       } finally {
-        server.cleanupExpiredSessions(Number.MAX_SAFE_INTEGER);
+        server.sweepIdle(Number.MAX_SAFE_INTEGER);
         server.stop();
       }
       recorded.push({

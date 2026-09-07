@@ -155,11 +155,50 @@ function readSide(side: Side, filePath: string, root: string): { content?: strin
   };
 }
 
-export function diffArgs(range: string, staged: boolean): string[] {
-  const args = ["diff", "--name-status", "-M"];
+export function diffArgs(range: string, staged: boolean, format = ["--name-status"]): string[] {
+  const args = ["diff", ...format, "-M"];
   if (staged) args.push("--cached");
   if (range) args.push(range);
   return args;
+}
+
+interface LineCounts {
+  added?: number;
+  removed?: number;
+}
+
+// -z emits "added\tremoved\tpath\0", and for a rename "added\tremoved\t\0old\0new\0".
+// A binary file reports "-" on both sides, which stays absent rather than becoming 0.
+function parseNumstat(stdout: string): Map<string, LineCounts> {
+  const counts = new Map<string, LineCounts>();
+  const tokens = stdout.split("\0");
+
+  for (let index = 0; index < tokens.length; index++) {
+    const [added, removed, head] = tokens[index].split("\t");
+    if (removed === undefined) continue;
+    const key = head || tokens[(index += 2)];
+    if (!key) continue;
+    counts.set(
+      key,
+      added === "-" ? {} : { added: Number(added) || 0, removed: Number(removed) || 0 }
+    );
+  }
+
+  return counts;
+}
+
+/** An untracked file has no git-side diff, so every one of its own lines is added. */
+function untrackedCounts(filePath: string, root: string): LineCounts {
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(path.join(root, filePath));
+  } catch {
+    return {};
+  }
+  if (isBinary(bytes)) return {};
+  const text = bytes.toString("utf8");
+  if (!text) return { added: 0, removed: 0 };
+  return { added: text.split("\n").length - (text.endsWith("\n") ? 1 : 0), removed: 0 };
 }
 
 /** Path list and statuses only. Blobs are fetched per file when a page is opened. */
@@ -176,11 +215,16 @@ export function resolveDiff(range: string, options: DiffOptions = {}): ResolvedD
   const { head } = endpoints(range, staged);
   const entries = parseNameStatus(listed.stdout);
 
+  const numstat = git(diffArgs(range, staged, ["--numstat", "-z"]), root);
+  const counts = numstat.ok ? parseNumstat(numstat.stdout) : new Map<string, LineCounts>();
+
   if (head.kind === "worktree") {
     const untracked = git(["ls-files", "--others", "--exclude-standard", "-z"], root);
     if (!untracked.ok) throw new Error(untracked.stderr || "git ls-files failed");
     for (const file of untracked.stdout.split("\0")) {
-      if (file) entries.push({ status: "added", newPath: file });
+      if (!file) continue;
+      entries.push({ status: "added", newPath: file });
+      counts.set(file, untrackedCounts(file, root));
     }
   }
 
@@ -188,6 +232,7 @@ export function resolveDiff(range: string, options: DiffOptions = {}): ResolvedD
     status: entry.status,
     oldPath: entry.oldPath,
     newPath: entry.newPath,
+    ...counts.get(entry.newPath ?? entry.oldPath ?? ""),
   }));
 
   return {

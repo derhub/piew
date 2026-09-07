@@ -67,8 +67,8 @@ echo '{
 }' | bunx @derhub/piew map s_123
 ```
 
-Map paths are ordered exactly as supplied and may contain up to five slash-separated
-segments. Updating a map is all-or-nothing.
+Map paths are ordered exactly as supplied and may contain up to 32 slash-separated
+segments and 512 characters. Updating a map is all-or-nothing.
 
 List the interactive tools available to the agent:
 
@@ -111,6 +111,7 @@ bunx @derhub/piew path/to/spec.md --wait --timeout 600
 bunx @derhub/piew poll s_123 --timeout 600
 bunx @derhub/piew status s_123
 echo '{"note":"done","items":[{"id":"c_1","status":"applied"}]}' | bunx @derhub/piew respond s_123
+bunx @derhub/piew close s_123
 ```
 
 The full agent workflow and feedback contract live in

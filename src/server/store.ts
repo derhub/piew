@@ -16,7 +16,6 @@ import type {
   ToolInteraction,
 } from "../lib/types";
 import {
-  countSessions,
   deleteSession,
   listSessionSummaries,
   pruneSessionFiles,
@@ -28,6 +27,10 @@ import {
 export type { ResolvedDiff, DiffSource } from "../cli/git";
 
 const MARKDOWN_EXT = new Set([".md", ".markdown"]);
+
+// Write-behind window. Long enough that a burst of keystrokes is one write, short
+// enough that a SIGKILL loses at most this much of a browser-side edit.
+const FLUSH_DELAY_MS = 250;
 
 type LineAnchor = {
   startLine?: number;
@@ -83,6 +86,10 @@ export function kindForFile(filePath: string): PageKind {
   return MARKDOWN_EXT.has(path.extname(filePath).toLowerCase()) ? "markdown" : "file";
 }
 
+// Wide enough for a repo-relative path of any real depth, narrow enough to keep the tree sane.
+const MAX_MAP_SEGMENTS = 32;
+const MAX_MAP_PATH_LENGTH = 512;
+
 export class ReviewMapError extends Error {
   constructor(
     message: string,
@@ -116,7 +123,8 @@ export function normalizeReviewMapRequest(input: unknown): ReplaceReviewMapReque
         const code = character.charCodeAt(0);
         return code < 32 || code === 127;
       }) ||
-      segments.length > 5 ||
+      segments.length > MAX_MAP_SEGMENTS ||
+      item.path.length > MAX_MAP_PATH_LENGTH ||
       segments.some((segment) => !segment.trim() || segment === "." || segment === "..")
     ) {
       throw new ReviewMapError(`Invalid Review Map path: ${item.path}`);
@@ -155,8 +163,15 @@ function isTerminal(item: ReviewComment | ReviewEdit): boolean {
 }
 
 export class Store {
+  private sessions = new Map<string, ReviewSession>();
+  private pending = new Map<string, ReturnType<typeof setTimeout>>();
+
   public read(sessionId: string): ReviewSession | undefined {
-    return readSession(sessionId);
+    const live = this.sessions.get(sessionId);
+    if (live) return live;
+    const session = readSession(sessionId);
+    if (session) this.sessions.set(sessionId, session);
+    return session;
   }
 
   public has(sessionId: string): boolean {
@@ -164,11 +179,40 @@ export class Store {
   }
 
   public list(): SessionSummary[] {
-    return listSessionSummaries();
+    return listSessionSummaries((sessionId) => this.sessions.get(sessionId));
   }
 
   public count(): number {
-    return countSessions();
+    return this.list().length;
+  }
+
+  public loadedCount(): number {
+    return this.sessions.size;
+  }
+
+  private markDirty(sessionId: string): void {
+    if (this.pending.has(sessionId)) return;
+    const timer = setTimeout(() => this.flush(sessionId), FLUSH_DELAY_MS);
+    timer.unref?.();
+    this.pending.set(sessionId, timer);
+  }
+
+  public flush(sessionId: string): void {
+    const timer = this.pending.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.pending.delete(sessionId);
+    const session = this.sessions.get(sessionId);
+    if (session) saveSession(session);
+  }
+
+  public flushAll(): void {
+    for (const sessionId of this.pending.keys()) this.flush(sessionId);
+  }
+
+  public evict(sessionId: string): void {
+    this.flush(sessionId);
+    this.sessions.delete(sessionId);
   }
 
   public mutate<T>(
@@ -179,7 +223,7 @@ export class Store {
     const session = this.read(sessionId);
     if (!session) return undefined;
     const result = change(session);
-    if (commit(result)) saveSession(session);
+    if (commit(result)) this.markDirty(sessionId);
     return result;
   }
 
@@ -236,10 +280,17 @@ export class Store {
   ): ReviewMap {
     const used = new Set<string>();
     const items = pages.map((page) => {
-      const base = makePath(page);
-      const segments = base.split("/");
+      let mapPath = makePath(page);
+      // A collision means two files with the same name; the parent that tells them apart is
+      // the next real directory above what the path already shows.
+      const parents = path.dirname(page.file).split(path.sep).filter(Boolean);
+      let shown = mapPath.split("/").length - 1;
+      while (used.has(mapPath) && shown < parents.length) {
+        shown++;
+        mapPath = `${parents[parents.length - shown]}/${mapPath}`;
+      }
+      const segments = mapPath.split("/");
       const leaf = segments.pop()!;
-      let mapPath = base;
       for (let suffix = 2; used.has(mapPath); suffix++) {
         mapPath = [...segments, `${suffix}-${leaf}`].join("/");
       }
@@ -258,6 +309,7 @@ export class Store {
   }
 
   private addSession(session: ReviewSession): SessionInfo {
+    this.sessions.set(session.id, session);
     saveSession(session);
     return this.sessionInfo(session);
   }
@@ -310,7 +362,7 @@ export class Store {
       this.reloadFilePage(session, page, content, hash);
       events.push({ event: "reload", pageId: page.id });
     }
-    if (events.length) saveSession(session);
+    if (events.length) this.markDirty(sessionId);
     return events;
   }
 
@@ -356,7 +408,7 @@ export class Store {
 
   public reconcile(session: ReviewSession): Array<{ event: "reload" | "stale"; pageId: string }> {
     const events = this.reconcileSession(session);
-    if (events.length) saveSession(session);
+    if (events.length) this.markDirty(session.id);
     return events;
   }
 
@@ -409,8 +461,7 @@ export class Store {
       reviewMap: this.defaultMap(
         `${path.basename(resolved.repoRoot)} ${resolved.range}`,
         pages,
-        (page) =>
-          [path.basename(resolved.repoRoot), ...page.filename.split("/").slice(-4)].join("/")
+        (page) => `${path.basename(resolved.repoRoot)}/${page.filename}`
       ),
       pages: Object.fromEntries(pages.map((page) => [page.id, page])),
       lastSeen: Date.now(),
@@ -491,6 +542,17 @@ export class Store {
     });
     if (!result) throw new ReviewMapError("Review session not found", 404);
     return result;
+  }
+
+  public setViewed(sessionId: string, pageId: string, viewed: boolean): PageData | null {
+    return (
+      this.mutate(sessionId, (session) => {
+        const page = session.pages[pageId];
+        if (!page) return null;
+        page.viewed = viewed;
+        return page;
+      }) ?? null
+    );
   }
 
   public addComment(sessionId: string, pageId: string, comment: ReviewComment): PageData | null {
@@ -626,11 +688,18 @@ export class Store {
   }
 
   public remove(sessionId: string): void {
+    const timer = this.pending.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.pending.delete(sessionId);
+    this.sessions.delete(sessionId);
     deleteSession(sessionId);
   }
 
   public pruneAll(): { sessions: number; files: number } {
     const sessions = this.count();
+    for (const timer of this.pending.values()) clearTimeout(timer);
+    this.pending.clear();
+    this.sessions.clear();
     const files = pruneSessionFiles();
     return { sessions, files };
   }

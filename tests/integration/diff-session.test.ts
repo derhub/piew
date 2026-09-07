@@ -115,6 +115,24 @@ describe("Diff Session Integration", () => {
     expect(page.diff.newContent).toContain("const value = 1;");
   });
 
+  it("keeps captured diff bytes out of the session JSON", async () => {
+    const created = await openDiff();
+    const record = fs.readFileSync(
+      path.join(process.env.PIEW_DIR!, "state-v4", "sessions", `${created.sessionId}.json`),
+      "utf8"
+    );
+    const stored = JSON.parse(record);
+    const pages = Object.values(stored.session.pages) as Array<{
+      diff: { oldContentHash?: string; newContentHash?: string };
+    }>;
+
+    expect({
+      schemaVersion: stored.schemaVersion,
+      captured: record.includes("const value ="),
+      hashed: pages.every((page) => !!page.diff.oldContentHash && !!page.diff.newContentHash),
+    }).toEqual({ schemaVersion: 5, captured: false, hashed: true });
+  });
+
   it("serves ten pages under 250ms p95 without Git or state writes", async () => {
     const created = await openDiff();
     const record = path.join(
@@ -180,5 +198,42 @@ describe("Diff Session Integration", () => {
         (page) => page.kind === "diff"
       )
     ).toBe(true);
+  });
+
+  describe("mark a file viewed", () => {
+    let sessionId: string;
+    let pageId: string;
+
+    const readSession = () =>
+      fetch(`http://127.0.0.1:${port}/api/session/${sessionId}`).then((res) => res.json());
+
+    beforeAll(async () => {
+      const created = await openDiff();
+      sessionId = created.sessionId;
+      pageId = created.reviewMap.items[0].pageId;
+      await post(`/api/session/${sessionId}/page/${pageId}/viewed`, { viewed: true });
+      server.store.flush(sessionId);
+    });
+
+    it("persists the flag across a daemon restart", () => {
+      const restarted = new ReviewServer();
+
+      expect(restarted.store.read(sessionId)!.pages[pageId].viewed).toBe(true);
+    });
+
+    it("reports it on the next session read", async () => {
+      expect((await readSession()).pages[pageId].viewed).toBe(true);
+    });
+
+    it("clears it when unmarked", async () => {
+      const response = await post(`/api/session/${sessionId}/page/${pageId}/viewed`, {
+        viewed: false,
+      });
+
+      expect([
+        (await response.json()).page.viewed,
+        (await readSession()).pages[pageId].viewed,
+      ]).toEqual([false, false]);
+    });
   });
 });

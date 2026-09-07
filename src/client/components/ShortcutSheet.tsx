@@ -9,6 +9,7 @@ const KEYS: Array<[string, string]> = [
   ["/", "Find in this page"],
   ["f", "Show or hide the feedback panel"],
   ["r", "Answer the agent's open question"],
+  ["v", "Mark the current diff file viewed"],
   [`${MOD} + Enter`, "Send the batch to the agent"],
   ["Esc", "Close the composer or this sheet"],
   ["?", "Show this sheet"],
