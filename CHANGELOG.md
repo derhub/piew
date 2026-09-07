@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 (2026-09-07)
+
+## What's Changed
+* perf(review): load page before source reconciliation by @derhub in https://github.com/derhub/piew/pull/35
+* fix: multi-session stability, diff sidebar paths, and review perf by @derhub in https://github.com/derhub/piew/pull/37
+* fix(release): generate notes once per pull request by @derhub in https://github.com/derhub/piew/pull/38
+
+
+**Full Changelog**: https://github.com/derhub/piew/compare/v0.6.0...v0.7.0
+
 ## [0.6.0](https://github.com/derhub/piew/compare/v0.5.0...v0.6.0) (2026-09-02)
 
 
