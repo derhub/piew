@@ -1,7 +1,8 @@
 import React from "react";
 import { createPortal } from "react-dom";
-import { File, FileDiff } from "@pierre/diffs/react";
+import { File, FileDiff, WorkerPoolContextProvider } from "@pierre/diffs/react";
 import { parseDiffFromFile } from "@pierre/diffs";
+import HighlightWorker from "@pierre/diffs/worker/worker.js?worker";
 import type { AnnotationSide, DiffLineAnnotation, LineAnnotation } from "@pierre/diffs";
 import { BookOpen, FileCode, Rows3, SquareSplitHorizontal } from "lucide-react";
 import { Button } from "~/components/ui/button";
@@ -13,8 +14,15 @@ import {
   type ComposerMode,
   type ViewerHandle,
 } from "~/components/Annotation";
-import { MarkdownViewer } from "~/components/MarkdownViewer";
 import type { DiffFile, PageMeta, ReviewComment, ReviewEdit } from "~/lib/types";
+
+const MarkdownViewer = React.lazy(() =>
+  import("~/components/MarkdownViewer").then((module) => ({ default: module.MarkdownViewer }))
+);
+
+// Shiki tokenizing a file is the whole of the pause between clicking a file and
+// seeing it; off the main thread the click stays inside a frame.
+const workerPool = { workerFactory: () => new HighlightWorker(), poolSize: 2 };
 
 type Side = "old" | "new";
 
@@ -86,7 +94,7 @@ const TO_PIERRE: Record<Side, AnnotationSide> = { old: "deletions", new: "additi
 const FROM_PIERRE = (side: AnnotationSide | undefined): Side =>
   side === "deletions" ? "old" : "new";
 
-export function CodeDiffViewer({
+export const CodeDiffViewer = React.memo(function CodeDiffViewer({
   page,
   diff,
   content,
@@ -450,38 +458,44 @@ export function CodeDiffViewer({
         : toolbar && <div className="flex justify-end">{toolbar}</div>}
 
       {view === "preview" ? (
-        <MarkdownViewer
-          content={fileView.contents}
-          comments={comments.filter((c) => sideOf(c) === viewSide)}
-          edits={viewSide === "new" ? edits : []}
-          onAddComment={(c) => onAddComment({ ...c, side: diff ? viewSide : undefined })}
-          onAddEdit={onAddEdit}
-          onDeleteComment={onDeleteComment}
-          onDeleteEdit={onDeleteEdit}
-          onUpdateComment={onUpdateComment}
-          onUpdateEdit={onUpdateEdit}
-          onNavigateLink={onNavigateLink}
-          mediaBaseUrl={mediaBaseUrl}
-          zoom={zoom}
-          viewerRef={previewRef}
-        />
-      ) : fileDiff ? (
-        <FileDiff
-          fileDiff={fileDiff}
-          options={{ theme, diffStyle: split ? "split" : "unified", ...interaction }}
-          lineAnnotations={diffAnnotations}
-          selectedLines={selectedLines}
-          renderAnnotation={renderAnnotation}
-        />
+        <React.Suspense fallback={null}>
+          <MarkdownViewer
+            content={fileView.contents}
+            comments={comments.filter((c) => sideOf(c) === viewSide)}
+            edits={viewSide === "new" ? edits : []}
+            onAddComment={(c) => onAddComment({ ...c, side: diff ? viewSide : undefined })}
+            onAddEdit={onAddEdit}
+            onDeleteComment={onDeleteComment}
+            onDeleteEdit={onDeleteEdit}
+            onUpdateComment={onUpdateComment}
+            onUpdateEdit={onUpdateEdit}
+            onNavigateLink={onNavigateLink}
+            mediaBaseUrl={mediaBaseUrl}
+            zoom={zoom}
+            viewerRef={previewRef}
+          />
+        </React.Suspense>
       ) : (
-        <File
-          file={fileView}
-          options={{ theme, ...interaction }}
-          lineAnnotations={fileAnnotations}
-          selectedLines={selectedLines}
-          renderAnnotation={renderAnnotation}
-        />
+        <WorkerPoolContextProvider poolOptions={workerPool} highlighterOptions={{ theme }}>
+          {fileDiff ? (
+            <FileDiff
+              fileDiff={fileDiff}
+              options={{ theme, diffStyle: split ? "split" : "unified", ...interaction }}
+              lineAnnotations={diffAnnotations}
+              selectedLines={selectedLines}
+              renderAnnotation={renderAnnotation}
+            />
+          ) : (
+            <File
+              file={fileView}
+              options={{ theme, ...interaction }}
+              lineAnnotations={fileAnnotations}
+              selectedLines={selectedLines}
+              renderAnnotation={renderAnnotation}
+            />
+          )}
+        </WorkerPoolContextProvider>
       )}
     </div>
   );
-}
+});

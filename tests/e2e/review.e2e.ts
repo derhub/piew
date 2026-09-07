@@ -7,12 +7,22 @@ import {
   addComment,
   chat,
   doc,
+  openDiffSession,
   openReview,
   openSession,
   panelWidth,
   respond,
   send,
 } from "./helpers";
+
+async function diffPageIds(
+  request: Parameters<typeof openSession>[0],
+  sessionId: string
+): Promise<string[]> {
+  const response = await request.get(`/api/session/${sessionId}`);
+  const body = (await response.json()) as { reviewMap: { items: Array<{ pageId: string }> } };
+  return body.reviewMap.items.map((item) => item.pageId);
+}
 
 async function invokeTool(
   request: Parameters<typeof openSession>[0],
@@ -912,6 +922,58 @@ test.describe("page loading", () => {
     await expect(page.getByText("Loading fixture.md...")).toBeVisible();
     await expect(page.getByRole("alert")).toContainText("Request timed out", { timeout: 3_000 });
     releaseRequest();
+  });
+});
+
+test.describe("a session refresh that leaves the open file alone", () => {
+  test("keeps the draft in an open composer", async ({ page, request }) => {
+    const session = await openDiffSession(request);
+    const [, other] = await diffPageIds(request, session.sessionId);
+    await page.goto(`/review/${session.sessionId}`);
+    await expect(page.locator("diffs-container [data-line]").first()).toBeVisible();
+
+    await page.keyboard.press("c");
+    await page.getByPlaceholder("Leave a comment").fill("draft that must survive");
+
+    await request.post(`/api/session/${session.sessionId}/page/${other}/comment`, {
+      data: { startLine: 1, feedback: "on the other file" },
+    });
+    await expect(page.getByRole("button", { name: "Send to agent" })).toBeEnabled();
+
+    await expect(page.getByPlaceholder("Leave a comment")).toHaveValue("draft that must survive");
+  });
+
+  test("keeps the expanded directories and the open file", async ({ page, request }) => {
+    const session = await openDiffSession(request);
+    const [, other] = await diffPageIds(request, session.sessionId);
+    await page.goto(`/review/${session.sessionId}`);
+    const tree = page.locator("#explorer");
+    await tree.getByRole("treeitem", { name: "b", exact: true }).click();
+    await expect(tree.getByRole("treeitem", { name: "x", exact: true })).toHaveCount(2);
+
+    await request.post(`/api/session/${session.sessionId}/page/${other}/comment`, {
+      data: { startLine: 1, feedback: "on the other file" },
+    });
+    await expect(page.getByRole("button", { name: "Send to agent" })).toBeEnabled();
+
+    await expect(tree.getByRole("treeitem", { name: "x", exact: true })).toHaveCount(2);
+    await expect(page.locator("#content header")).toContainText("src/a/x/y/z/file.ts");
+  });
+});
+
+test.describe("a session refresh carrying a comment on the open file", () => {
+  test("renders the comment and leaves the file open", async ({ page, request }) => {
+    const session = await openDiffSession(request);
+    const [open] = await diffPageIds(request, session.sessionId);
+    await page.goto(`/review/${session.sessionId}`);
+    await expect(page.locator("#content header")).toContainText("src/a/x/y/z/file.ts");
+
+    await request.post(`/api/session/${session.sessionId}/page/${open}/comment`, {
+      data: { startLine: 1, feedback: "arrived over the wire" },
+    });
+
+    await expect(doc(page).getByText("arrived over the wire")).toBeVisible();
+    await expect(page.locator("#content header")).toContainText("src/a/x/y/z/file.ts");
   });
 });
 
