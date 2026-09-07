@@ -83,6 +83,10 @@ export function kindForFile(filePath: string): PageKind {
   return MARKDOWN_EXT.has(path.extname(filePath).toLowerCase()) ? "markdown" : "file";
 }
 
+// Wide enough for a repo-relative path of any real depth, narrow enough to keep the tree sane.
+const MAX_MAP_SEGMENTS = 32;
+const MAX_MAP_PATH_LENGTH = 512;
+
 export class ReviewMapError extends Error {
   constructor(
     message: string,
@@ -116,7 +120,8 @@ export function normalizeReviewMapRequest(input: unknown): ReplaceReviewMapReque
         const code = character.charCodeAt(0);
         return code < 32 || code === 127;
       }) ||
-      segments.length > 5 ||
+      segments.length > MAX_MAP_SEGMENTS ||
+      item.path.length > MAX_MAP_PATH_LENGTH ||
       segments.some((segment) => !segment.trim() || segment === "." || segment === "..")
     ) {
       throw new ReviewMapError(`Invalid Review Map path: ${item.path}`);
@@ -236,10 +241,17 @@ export class Store {
   ): ReviewMap {
     const used = new Set<string>();
     const items = pages.map((page) => {
-      const base = makePath(page);
-      const segments = base.split("/");
+      let mapPath = makePath(page);
+      // A collision means two files with the same name; the parent that tells them apart is
+      // the next real directory above what the path already shows.
+      const parents = path.dirname(page.file).split(path.sep).filter(Boolean);
+      let shown = mapPath.split("/").length - 1;
+      while (used.has(mapPath) && shown < parents.length) {
+        shown++;
+        mapPath = `${parents[parents.length - shown]}/${mapPath}`;
+      }
+      const segments = mapPath.split("/");
       const leaf = segments.pop()!;
-      let mapPath = base;
       for (let suffix = 2; used.has(mapPath); suffix++) {
         mapPath = [...segments, `${suffix}-${leaf}`].join("/");
       }
@@ -409,8 +421,7 @@ export class Store {
       reviewMap: this.defaultMap(
         `${path.basename(resolved.repoRoot)} ${resolved.range}`,
         pages,
-        (page) =>
-          [path.basename(resolved.repoRoot), ...page.filename.split("/").slice(-4)].join("/")
+        (page) => `${path.basename(resolved.repoRoot)}/${page.filename}`
       ),
       pages: Object.fromEntries(pages.map((page) => [page.id, page])),
       lastSeen: Date.now(),

@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import type { APIRequestContext, Page } from "@playwright/test";
+import { resolveDiff } from "../../src/cli/git";
 
 /** Line 3 is the opening paragraph, line 7 holds "beacon", line 16 is the last one. */
 export const DOC = `# Review fixture
@@ -37,6 +39,48 @@ export async function openSession(request: APIRequestContext, markdown = DOC): P
   const res = await request.post("/api/session", { data: { files: [file] } });
   const body = await res.json();
   return { sessionId: body.sessionId, pageId: body.reviewMap.items[0].pageId, file };
+}
+
+export interface DiffSession {
+  sessionId: string;
+  repo: string;
+  repoName: string;
+  files: string[];
+}
+
+/** A diff session on a throwaway repo whose changed files share their last four segments. */
+export async function openDiffSession(
+  request: APIRequestContext,
+  files = ["src/a/x/y/z/file.ts", "src/b/x/y/z/file.ts"]
+): Promise<DiffSession> {
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "piew-e2e-diff-")));
+  const git = (...args: string[]) => {
+    const res = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    if (res.status !== 0) throw new Error(`git ${args.join(" ")}: ${res.stderr}`);
+  };
+  const write = (value: number) => {
+    for (const relative of files) {
+      const target = path.join(repo, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, `export const value = ${value};\n`.repeat(20), "utf8");
+    }
+  };
+
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "test@example.com");
+  git("config", "user.name", "test");
+  write(1);
+  git("add", ".");
+  git("commit", "-qm", "base");
+  write(2);
+  git("add", "-A");
+  git("commit", "-qm", "change");
+
+  const res = await request.post("/api/session", {
+    data: { diff: resolveDiff("HEAD~1..HEAD", { cwd: repo }) },
+  });
+  const body = await res.json();
+  return { sessionId: body.sessionId, repo, repoName: path.basename(repo), files };
 }
 
 export async function addComment(

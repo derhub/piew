@@ -21,7 +21,7 @@ echo '{
 }' | piew map s_123
 ```
 
-Paths may contain five safe slash-separated segments. Replacement is atomic.
+Paths may contain up to 32 safe slash-separated segments and 512 characters. Replacement is atomic.
 Missing sources, unsafe or duplicate paths, duplicate pages, and removal of a page
 with unresolved feedback reject the whole update.
 

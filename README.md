@@ -67,8 +67,8 @@ echo '{
 }' | bunx @derhub/piew map s_123
 ```
 
-Map paths are ordered exactly as supplied and may contain up to five slash-separated
-segments. Updating a map is all-or-nothing.
+Map paths are ordered exactly as supplied and may contain up to 32 slash-separated
+segments and 512 characters. Updating a map is all-or-nothing.
 
 List the interactive tools available to the agent:
 

@@ -103,6 +103,22 @@ test("Review Map keeps a complex live review oriented", async ({ page, request }
   await expect(page.getByTitle("Web/Auth/Login/fixture.md")).toBeVisible();
   await expect.poll(() => content.evaluate((element) => element.scrollTop)).toBe(beforeScroll);
 
+  await expect(page.getByRole("treeitem", { name: "Web", exact: true })).toHaveAttribute(
+    "aria-expanded",
+    "true"
+  );
+  await expect(page.getByRole("treeitem", { name: "API", exact: true })).toHaveAttribute(
+    "aria-expanded",
+    "true"
+  );
+  const webTopAfterComment = (await page
+    .getByRole("treeitem", { name: "Web", exact: true })
+    .boundingBox())!.y;
+  const apiTopAfterComment = (await page
+    .getByRole("treeitem", { name: "API", exact: true })
+    .boundingBox())!.y;
+  expect(webTopAfterComment).toBeLessThan(apiTopAfterComment);
+
   await search.fill("third");
   await page.getByRole("treeitem", { name: "third.ts", exact: true }).click();
   await expect(page.getByText("export const third = true;")).toBeVisible();

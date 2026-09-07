@@ -1,7 +1,12 @@
 import React from "react";
 import { Search, X } from "lucide-react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { prepareFileTreeInput, themeToTreeStyles, type GitStatusEntry } from "@pierre/trees";
+import {
+  prepareFileTreeInput,
+  themeToTreeStyles,
+  type FileTreeRowDecoration,
+  type GitStatusEntry,
+} from "@pierre/trees";
 import { resolveTheme } from "@pierre/diffs";
 import { Button } from "~/components/ui/button";
 import { useCodeTheme } from "~/hooks/use-code-theme";
@@ -57,7 +62,7 @@ function prepareSidebarTreeInput(paths: string[]) {
   });
 }
 
-export function DocumentSidebar({
+export const DocumentSidebar = React.memo(function DocumentSidebar({
   pages,
   reviewMap,
   activePageId,
@@ -80,15 +85,38 @@ export function DocumentSidebar({
     return map;
   }, [items]);
 
-  const countByPath = React.useMemo(() => {
-    const map = new Map<string, number>();
-    items.forEach((item) => {
+  const decorationByPath = React.useMemo(() => {
+    const map = new Map<string, FileTreeRowDecoration>();
+    for (const item of items) {
       const page = pages[item.pageId];
-      map.set(item.path, page ? page.comments.length + page.edits.length : 0);
-    });
+      if (!page) continue;
+
+      const parts: Array<{ text: string }> = [];
+      const labels: string[] = [];
+      if (page.kind === "diff" && page.viewed) {
+        parts.push({ text: "✓ " });
+        labels.push("Viewed");
+      }
+      if (page.added !== undefined) {
+        parts.push({ text: `+${page.added} -${page.removed}` });
+        labels.push(`${page.added} added, ${page.removed} removed`);
+      }
+      const count = page.comments.length + page.edits.length;
+      if (count > 0) {
+        parts.push({ text: ` ${count}` });
+        labels.push(`${count} annotation(s)`);
+      }
+
+      if (parts.length) {
+        map.set(item.path, {
+          text: parts.map((part) => part.text).join(""),
+          parts,
+          title: labels.join(", "),
+        });
+      }
+    }
     return map;
   }, [items, pages]);
-  const annotationCountsKey = JSON.stringify([...countByPath]);
 
   const gitStatus = React.useMemo<GitStatusEntry[]>(
     () =>
@@ -113,8 +141,8 @@ export function DocumentSidebar({
   // must see current props rather than the ones captured at mount.
   const selectRef = React.useRef(onSelectPage);
   selectRef.current = onSelectPage;
-  const countRef = React.useRef(countByPath);
-  countRef.current = countByPath;
+  const decorationRef = React.useRef(decorationByPath);
+  decorationRef.current = decorationByPath;
   const keyRef = React.useRef(keyByPath);
   keyRef.current = keyByPath;
 
@@ -131,11 +159,8 @@ export function DocumentSidebar({
       const key = selected.length ? keyRef.current.get(selected[0]) : undefined;
       if (key) selectRef.current(key);
     },
-    renderRowDecoration: ({ row }) => {
-      if (row.kind !== "file") return null;
-      const count = countRef.current.get(row.path) ?? 0;
-      return count > 0 ? { text: String(count), title: `${count} annotation(s)` } : null;
-    },
+    renderRowDecoration: ({ row }) =>
+      row.kind === "file" ? (decorationRef.current.get(row.path) ?? null) : null,
   });
 
   // The model is created once; every later change is a method call on it.
@@ -150,17 +175,29 @@ export function DocumentSidebar({
       (treePath) => model.getItem(treePath)?.isExpanded() ?? false
     );
     model.resetPaths({ preparedInput, initialExpandedPaths: expanded });
-  }, [model, pathsKey, preparedInput, paths, annotationCountsKey, initialExpandedPaths]);
+  }, [model, pathsKey, preparedInput, initialExpandedPaths]);
 
   React.useEffect(() => {
     model.setGitStatus(gitStatus);
   }, [model, gitStatus]);
 
+  // setGitStatus is a no-op when the git status entries are unchanged, so a
+  // decoration-only change needs its own repaint; setComposition always
+  // re-renders and, passed its own current value, changes nothing else.
+  const decorationKey = JSON.stringify([...decorationByPath]);
+  React.useEffect(() => {
+    model.setComposition(model.getComposition());
+  }, [model, decorationKey]);
+
   // Selection can also change from outside the tree, through a drawer jump or a
-  // link between documents, and the highlighted row has to follow it.
+  // link between documents, and the highlighted row has to follow it. select()
+  // adds to the selection, so the row left behind has to go first or the tree
+  // reports the old path as the selected one and sends the reader back to it.
   React.useEffect(() => {
     if (!activePath) return;
-    if (model.getSelectedPaths().includes(activePath)) return;
+    const selected = model.getSelectedPaths();
+    if (selected.includes(activePath)) return;
+    for (const treePath of selected) model.getItem(treePath)?.deselect();
     model.getItem(activePath)?.select();
   }, [model, activePath]);
 
@@ -220,4 +257,4 @@ export function DocumentSidebar({
       <FileTree model={model} className="min-h-0 flex-1 text-[13px]" style={treeStyle} />
     </div>
   );
-}
+});
