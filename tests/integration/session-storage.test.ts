@@ -224,7 +224,7 @@ describe("session storage", () => {
     fs.writeFileSync(path.join(root, "state-v3.json"), "legacy");
     await runCli(firstSource);
     await runCli(secondSource);
-    const record = JSON.parse(fs.readFileSync(path.join(root, "server.json"), "utf8"));
+    const record = JSON.parse(fs.readFileSync(path.join(root, "server-v4.json"), "utf8"));
 
     try {
       const unauthorized = await fetch(`http://127.0.0.1:${record.port}/api/sessions`, {

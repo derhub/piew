@@ -79,7 +79,7 @@ describe("production package", () => {
       tool: "question",
     });
 
-    const record = JSON.parse(fs.readFileSync(path.join(state, "server.json"), "utf8"));
+    const record = JSON.parse(fs.readFileSync(path.join(state, "server-v4.json"), "utf8"));
     run(
       [
         process.execPath,

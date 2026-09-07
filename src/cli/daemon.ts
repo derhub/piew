@@ -151,7 +151,8 @@ export async function restartDaemon(): Promise<ServerRecord> {
   const existing = readServerRecord();
   if (existing) {
     const health = await readServerHealth(existing.port);
-    if (!(await stopDaemon(existing, health))) {
+    const alive = health !== null || isProcessRunning(existing.pid);
+    if (alive && !(await stopDaemon(existing, health))) {
       throw new Error(`Could not stop review daemon. See ${daemonLogPath()}`);
     }
   }
@@ -164,9 +165,11 @@ export async function ensureDaemonRunning(): Promise<ServerRecord> {
   const existing = readServerRecord();
   if (existing) {
     const health = await readServerHealth(existing.port);
-    if (health?.protocol === SERVER_PROTOCOL && health.pid === existing.pid) return existing;
-    if (health && !(await stopDaemon(existing, health))) {
-      throw new Error(`Could not stop outdated review daemon. See ${logPath}`);
+    if (health?.protocol === SERVER_PROTOCOL) {
+      if (health.pid === existing.pid) return existing;
+      if (!(await stopDaemon(existing, health))) {
+        throw new Error(`Could not stop stale review daemon. See ${logPath}`);
+      }
     }
   }
   clearAbandonedDaemonLock();
