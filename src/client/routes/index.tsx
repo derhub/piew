@@ -1,8 +1,9 @@
 import React from "react";
 import { createRoute, Link } from "@tanstack/react-router";
 import { Route as rootRoute } from "./__root";
-import { FileText, GitCompare, Terminal } from "lucide-react";
+import { FileText, GitCompare, Terminal, X } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "~/components/ui/card";
+import { Button } from "~/components/ui/button";
 
 export const Route = createRoute({
   getParentRoute: () => rootRoute,
@@ -21,12 +22,23 @@ interface SessionRow {
 function IndexComponent() {
   const [sessions, setSessions] = React.useState<SessionRow[] | null>(null);
 
-  React.useEffect(() => {
+  const loadSessions = React.useCallback(() => {
     fetch("/api/sessions")
       .then((r) => r.json())
       .then((body) => setSessions(body.sessions ?? []))
       .catch(() => setSessions([]));
   }, []);
+
+  React.useEffect(() => {
+    loadSessions();
+  }, [loadSessions]);
+
+  const closeSession = React.useCallback(
+    (sessionId: string) => {
+      fetch(`/api/session/${sessionId}`, { method: "DELETE" }).then(loadSessions);
+    },
+    [loadSessions]
+  );
 
   return (
     <div className="mx-auto flex w-full max-w-xl flex-1 flex-col justify-center gap-4 p-6">
@@ -59,22 +71,34 @@ function IndexComponent() {
             <div className="border-border flex flex-col gap-1 border-t pt-3">
               <p className="text-foreground mb-1 text-xs font-semibold">Open reviews</p>
               {sessions.map((session) => (
-                <Link
+                <div
                   key={session.id}
-                  to="/review/$sessionId"
-                  params={{ sessionId: session.id }}
                   className="hover:bg-muted/70 flex items-center gap-2 rounded-md px-2 py-1.5 text-sm"
                 >
-                  {session.kind === "diff" ? (
-                    <GitCompare className="size-3.5 shrink-0" />
-                  ) : (
-                    <FileText className="size-3.5 shrink-0" />
-                  )}
-                  <span className="min-w-0 flex-1 truncate">{session.title}</span>
-                  <span className="text-muted-foreground shrink-0 text-xs">
-                    {session.files.length} file{session.files.length === 1 ? "" : "s"}
-                  </span>
-                </Link>
+                  <Link
+                    to="/review/$sessionId"
+                    params={{ sessionId: session.id }}
+                    className="flex min-w-0 flex-1 items-center gap-2"
+                  >
+                    {session.kind === "diff" ? (
+                      <GitCompare className="size-3.5 shrink-0" />
+                    ) : (
+                      <FileText className="size-3.5 shrink-0" />
+                    )}
+                    <span className="min-w-0 flex-1 truncate">{session.title}</span>
+                    <span className="text-muted-foreground shrink-0 text-xs">
+                      {session.files.length} file{session.files.length === 1 ? "" : "s"}
+                    </span>
+                  </Link>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={`Close ${session.title}`}
+                    onClick={() => closeSession(session.id)}
+                  >
+                    <X />
+                  </Button>
+                </div>
               ))}
             </div>
           )}

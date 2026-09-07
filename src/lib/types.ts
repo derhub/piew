@@ -15,6 +15,9 @@ export interface DiffFile {
   /** Digest of the captured new-side bytes, including binary blobs. */
   newHash?: string;
   status: DiffStatus;
+  /** From `git diff --numstat`; both absent for a binary file. */
+  added?: number;
+  removed?: number;
 }
 
 export type ItemStatus = "open" | "applied" | "skipped" | "question";
@@ -75,6 +78,8 @@ export interface PageData {
   /** Only a working-tree new side can drift, so only it can go stale. */
   liveHead?: boolean;
   stale?: boolean;
+  /** Reviewer-set, per file, persisted with the session. */
+  viewed?: boolean;
   comments: ReviewComment[];
   edits: ReviewEdit[];
   hash: string;
@@ -83,6 +88,8 @@ export interface PageData {
 // What GET /api/session/:id returns per page: everything except the bytes.
 export type PageMeta = Omit<PageData, "content" | "diff"> & {
   status?: DiffStatus;
+  added?: number;
+  removed?: number;
 };
 
 export type PageContent = Pick<PageData, "id" | "kind" | "hash"> &

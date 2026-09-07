@@ -478,6 +478,105 @@ describe("session storage", () => {
     expect(result.title).toBe("Review Map");
   });
 
+  it("closes one session: deletes its file, ends its SSE stream, resolves its pending poll, and leaves the other session readable", async () => {
+    const firstSource = path.join(root, "first.md");
+    const secondSource = path.join(root, "second.md");
+    fs.writeFileSync(firstSource, "# First\n");
+    fs.writeFileSync(secondSource, "# Second\n");
+    const { sessionId: firstId } = await runCli(firstSource);
+    const { sessionId: secondId } = await runCli(secondSource);
+    const record = JSON.parse(fs.readFileSync(path.join(root, "server-v4.json"), "utf8"));
+
+    try {
+      const sse = await fetch(`http://127.0.0.1:${record.port}/events?session=${firstId}`);
+      const reader = sse.body!.getReader();
+      await reader.read();
+
+      const pollPromise = fetch(
+        `http://127.0.0.1:${record.port}/api/session/${firstId}/poll?timeout=5`
+      ).then((r) => r.json());
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const closeRes = await fetch(`http://127.0.0.1:${record.port}/api/session/${firstId}`, {
+        method: "DELETE",
+      });
+      expect(closeRes.status).toBe(200);
+      expect(await closeRes.json()).toEqual({ closed: true });
+
+      const pollBody = (await pollPromise) as { status: string };
+      expect(pollBody.status).toBe("closed");
+
+      // The poll's own "agent: listening" broadcast may still be buffered ahead of
+      // the close, so drain until the stream itself ends.
+      let streamClosed = false;
+      let received = "";
+      const decoder = new TextDecoder();
+      for (let i = 0; i < 5 && !streamClosed; i++) {
+        const chunk = await reader.read();
+        if (chunk.value) received += decoder.decode(chunk.value);
+        streamClosed = chunk.done;
+      }
+      expect(streamClosed).toBe(true);
+      expect(received).toContain("event: closed");
+
+      const missing = await fetch(`http://127.0.0.1:${record.port}/api/session/${firstId}`);
+      expect(missing.status).toBe(404);
+
+      const other = await fetch(`http://127.0.0.1:${record.port}/api/session/${secondId}`);
+      expect(other.status).toBe(200);
+
+      const sessionsDir = path.join(root, "state-v4", "sessions");
+      expect(fs.existsSync(path.join(sessionsDir, `${firstId}.json`))).toBe(false);
+      expect(fs.existsSync(path.join(sessionsDir, `${secondId}.json`))).toBe(true);
+    } finally {
+      await fetch(`http://127.0.0.1:${record.port}/shutdown`, {
+        method: "POST",
+        headers: { "x-piew-token": record.token },
+      }).catch(() => undefined);
+    }
+  });
+
+  it("answers a close of an unknown session with a typed 404 and deletes nothing", async () => {
+    const source = path.join(root, "solo.md");
+    fs.writeFileSync(source, "# Solo\n");
+    const { sessionId } = await runCli(source);
+    const record = JSON.parse(fs.readFileSync(path.join(root, "server-v4.json"), "utf8"));
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${record.port}/api/session/s_unknown`, {
+        method: "DELETE",
+      });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "Session not found" });
+
+      const stillThere = await fetch(`http://127.0.0.1:${record.port}/api/session/${sessionId}`);
+      expect(stillThere.status).toBe(200);
+    } finally {
+      await fetch(`http://127.0.0.1:${record.port}/shutdown`, {
+        method: "POST",
+        headers: { "x-piew-token": record.token },
+      }).catch(() => undefined);
+    }
+  });
+
+  it("piew close prints the closed session id and removes it", async () => {
+    const source = path.join(root, "cli-close.md");
+    fs.writeFileSync(source, "# CLI Close\n");
+    const { sessionId } = await runCli(source);
+    const record = JSON.parse(fs.readFileSync(path.join(root, "server-v4.json"), "utf8"));
+
+    try {
+      expect(await runCli("close", sessionId)).toEqual({ sessionId, closed: true });
+      const missing = await fetch(`http://127.0.0.1:${record.port}/api/session/${sessionId}`);
+      expect(missing.status).toBe(404);
+    } finally {
+      await fetch(`http://127.0.0.1:${record.port}/shutdown`, {
+        method: "POST",
+        headers: { "x-piew-token": record.token },
+      }).catch(() => undefined);
+    }
+  });
+
   it("prunes every stored session without deleting reviewed sources", async () => {
     const firstSource = path.join(root, "first.md");
     const secondSource = path.join(root, "second.md");

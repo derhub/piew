@@ -43,6 +43,15 @@ that were originally reviewed. Polling an unacknowledged batch returns it again;
 told is on disk before it hears it; a comment or edit made in the browser in the last
 250 ms before the daemon is killed outright is not restored.
 
+Close a session and delete its stored state:
+
+```sh
+piew close s_123
+```
+
+A poll waiting on a closed session resolves once with `status: "closed"` instead of
+timing out.
+
 ## Tool packages
 
 Tools live at `$PIEW_DIR/tools/<name>/`, with `~/.piew/tools/` as the default

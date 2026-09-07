@@ -544,6 +544,17 @@ export class Store {
     return result;
   }
 
+  public setViewed(sessionId: string, pageId: string, viewed: boolean): PageData | null {
+    return (
+      this.mutate(sessionId, (session) => {
+        const page = session.pages[pageId];
+        if (!page) return null;
+        page.viewed = viewed;
+        return page;
+      }) ?? null
+    );
+  }
+
   public addComment(sessionId: string, pageId: string, comment: ReviewComment): PageData | null {
     return (
       this.mutate(sessionId, (session) => {

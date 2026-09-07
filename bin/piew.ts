@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import {
+  closeCommand,
   diffCommand,
   mapCommand,
   openCommand,
@@ -26,6 +27,7 @@ Usage:
       --timeout <secs>                Exit with timeout status if no feedback arrives
   piew respond <session-id>           Answer the batch you were given; JSON on stdin
   piew status <session-id>            Check whether feedback is waiting without blocking
+  piew close <session-id>             Close one session and delete its stored state
   piew prune                          Remove all stored Piew sessions and session state
   piew restart                        Restart the local review daemon
 
@@ -126,6 +128,13 @@ if (command === "poll") {
     process.exit(1);
   }
   await statusCommand(sessionId);
+} else if (command === "close") {
+  const sessionId = argv.slice(1).find((a) => !a.startsWith("-"));
+  if (!sessionId) {
+    console.error("Usage: piew close <session-id>");
+    process.exit(1);
+  }
+  await closeCommand(sessionId);
 } else if (command === "prune") {
   await pruneCommand();
 } else if (command === "restart") {

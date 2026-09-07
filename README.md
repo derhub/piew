@@ -111,6 +111,7 @@ bunx @derhub/piew path/to/spec.md --wait --timeout 600
 bunx @derhub/piew poll s_123 --timeout 600
 bunx @derhub/piew status s_123
 echo '{"note":"done","items":[{"id":"c_1","status":"applied"}]}' | bunx @derhub/piew respond s_123
+bunx @derhub/piew close s_123
 ```
 
 The full agent workflow and feedback contract live in

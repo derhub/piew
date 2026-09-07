@@ -183,6 +183,40 @@ describe("resolveDiff", () => {
     expect(binary.newHash).toMatch(/^[a-f0-9]{40}$/);
   });
 
+  it("records added and removed counts per file", () => {
+    const files = resolveDiff("HEAD~1..HEAD", { cwd: repo }).files;
+
+    expect([find(files, "kept.ts"), find(files, "added.ts"), find(files, "gone.ts")]).toEqual([
+      { status: "modified", oldPath: "kept.ts", newPath: "kept.ts", added: 1, removed: 1 },
+      { status: "added", newPath: "added.ts", added: 1, removed: 0 },
+      { status: "deleted", oldPath: "gone.ts", added: 0, removed: 1 },
+    ]);
+  });
+
+  it("leaves both counts absent for a binary file", () => {
+    const binary = find(resolveDiff("HEAD~1..HEAD", { cwd: repo }).files, "logo.png");
+
+    expect(binary.added).toBeUndefined();
+    expect(binary.removed).toBeUndefined();
+  });
+
+  it("counts every line of an untracked file as added", () => {
+    const file = path.join(repo, "counted.ts");
+    fs.writeFileSync(file, "one\ntwo\nthree\n");
+
+    try {
+      const untracked = find(resolveDiff("", { cwd: repo }).files, "counted.ts");
+      expect(untracked).toEqual({
+        status: "added",
+        newPath: "counted.ts",
+        added: 3,
+        removed: 0,
+      });
+    } finally {
+      fs.unlinkSync(file);
+    }
+  });
+
   it("marks a committed range as fixed and a working-tree range as live", () => {
     expect(resolveDiff("HEAD~1..HEAD", { cwd: repo }).liveHead).toBe(false);
     expect(resolveDiff("", { cwd: repo }).liveHead).toBe(true);

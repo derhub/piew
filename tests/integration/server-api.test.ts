@@ -127,6 +127,7 @@ describe("ReviewServer HTTP API", () => {
     port = await server.start(5891);
     expect(server.resourceCounts()).toEqual({
       sessions: 0,
+      loaded: 0,
       watchers: 0,
       sse: 0,
       pollers: 0,
@@ -152,6 +153,7 @@ describe("ReviewServer HTTP API", () => {
     await reader.read();
     expect(server.resourceCounts()).toEqual({
       sessions: 1,
+      loaded: 1,
       watchers: 1,
       sse: 1,
       pollers: 0,
@@ -161,6 +163,7 @@ describe("ReviewServer HTTP API", () => {
     await Bun.sleep(10);
     expect(server.resourceCounts()).toEqual({
       sessions: 0,
+      loaded: 0,
       watchers: 0,
       sse: 0,
       pollers: 0,
@@ -223,6 +226,7 @@ describe("ReviewServer HTTP API", () => {
     await Bun.sleep(10);
     expect(server.resourceCounts()).toEqual({
       sessions: 1,
+      loaded: 1,
       watchers: 0,
       sse: 0,
       pollers: 1,
@@ -231,6 +235,7 @@ describe("ReviewServer HTTP API", () => {
     expect((await poll).status).toBe(200);
     expect(server.resourceCounts()).toEqual({
       sessions: 0,
+      loaded: 0,
       watchers: 0,
       sse: 0,
       pollers: 0,
@@ -257,6 +262,7 @@ describe("ReviewServer HTTP API", () => {
     await Bun.sleep(10);
     expect(server.resourceCounts()).toEqual({
       sessions: 0,
+      loaded: 0,
       watchers: 0,
       sse: 0,
       pollers: 0,
