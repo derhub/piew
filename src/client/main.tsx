@@ -3,7 +3,10 @@ import ReactDOM from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { TooltipProvider } from "~/components/ui/tooltip";
 import { router } from "./router";
+import { startBrowserTelemetry } from "./lib/telemetry";
 import "./styles.css";
+
+startBrowserTelemetry();
 
 window.addEventListener("error", (e) => {
   console.error("Global client error:", e.error || e.message);

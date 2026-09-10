@@ -32,6 +32,21 @@ npx skills add ./skills/piew
 
 ## Use
 
+Telemetry is disabled by default. Start the daemon with `PIEW_TELEMETRY=1` to
+enable content-free performance diagnostics in `~/.piew/telemetry.log`
+(`$PIEW_DIR/telemetry.log` when configured), retaining a 1 MiB file and one previous
+file at `telemetry.log.1`. Every ten seconds it exports queued measurements to an
+optional local OTLP collector at `http://127.0.0.1:4318/v1/logs`. Collector outages
+do not block review requests; failed exports are counted and are not replayed.
+Restart the daemon without this setting to disable local and exported diagnostics.
+
+Diagnostics include request handling time/status, resource counts, memory, uptime,
+and maximum observed delay of a one-second timer. Browser samples report navigation,
+paint milestones, session resource timing, and supported long tasks. They contain
+no document text, paths, URLs, session IDs, or error messages. Request timing ends
+when the Response is created; SSE records the handshake and long polls include
+their intentional wait. Browser paint milestones are not React render CPU timings.
+
 Open Markdown or source files:
 
 ```sh

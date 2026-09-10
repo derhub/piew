@@ -1,16 +1,23 @@
 import { acquireDaemonLock, releaseDaemonLock } from "../cli/daemon";
 import { ReviewServer } from "./server";
+import { Telemetry } from "./telemetry";
+import { stateDir } from "../cli/paths";
+import path from "node:path";
 
 if (!acquireDaemonLock()) process.exit(0);
 
-const server = new ReviewServer();
+const telemetry =
+  process.env.PIEW_TELEMETRY === "1"
+    ? new Telemetry({ logPath: path.join(stateDir(), "telemetry.log") })
+    : undefined;
+const server = new ReviewServer(undefined, telemetry);
 let stopping = false;
 
-function stop(exitCode = 0) {
+async function stop(exitCode = 0) {
   if (stopping) return;
   stopping = true;
   try {
-    server.stop();
+    await server.stop();
   } finally {
     releaseDaemonLock();
     process.exit(exitCode);
@@ -18,12 +25,12 @@ function stop(exitCode = 0) {
 }
 
 process.once("exit", () => releaseDaemonLock());
-process.once("SIGTERM", () => stop());
-process.once("SIGINT", () => stop());
+process.once("SIGTERM", () => void stop());
+process.once("SIGINT", () => void stop());
 
 try {
   await server.start(4173);
 } catch (error) {
   console.error(error);
-  stop(1);
+  await stop(1);
 }

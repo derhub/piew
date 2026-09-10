@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { ReviewMapError, Store } from "./store";
 import { type PollerRecord, SessionRuntime } from "./session-runtime";
 import { FileWatcher } from "./watcher";
+import type { Telemetry } from "./telemetry";
 import { readDiffBlobs, type ResolvedDiff } from "../cli/git";
 import { canonicalTarget, ensureStateDir, SERVER_PROTOCOL, serverRecordPath } from "../cli/paths";
 import { discoverToolPackages } from "../lib/tools";
@@ -110,7 +111,10 @@ export class ReviewServer {
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private staticDir: string;
 
-  constructor(staticDir?: string) {
+  constructor(
+    staticDir?: string,
+    private telemetry?: Telemetry
+  ) {
     this.staticDir = staticDir || path.resolve(__dirname, "../../dist");
     this.watcher = new FileWatcher((file, content, hash) => {
       for (const sessionId of this.runtime.sessionsForSource(file)) {
@@ -361,12 +365,17 @@ export class ReviewServer {
     this.sweepTimer = setInterval(() => this.sweepIdle(), IDLE_SWEEP_MS);
     this.sweepTimer.unref?.();
 
-    this.serverInstance = Bun.serve({
+    const options = {
       port: this.port,
       // Long polls hold a request open. Bun's default idleTimeout is 10s and closes
       // the socket mid-wait; 255 is the maximum it accepts.
       idleTimeout: MAX_IDLE_SECS,
-      fetch: async (req) => {
+      fetch: async (req: Request) => {
+        if (new URL(req.url).pathname === "/api/telemetry") {
+          if (req.method === "GET") return Response.json({ enabled: !!this.telemetry });
+          if (req.method !== "POST") return new Response(null, { status: 405 });
+          return this.telemetry?.browser(req) ?? new Response(null, { status: 204 });
+        }
         const url = new URL(req.url);
         const route = url.pathname;
 
@@ -1521,7 +1530,16 @@ export class ReviewServer {
 
         return new Response("piew", { headers: corsHeaders });
       },
-    });
+    };
+    const telemetry = this.telemetry;
+    if (telemetry) {
+      const handle = options.fetch;
+      options.fetch = (req) =>
+        new URL(req.url).pathname === "/api/telemetry"
+          ? handle(req)
+          : telemetry.request(req, () => handle(req));
+    }
+    this.serverInstance = Bun.serve(options);
 
     fs.writeFileSync(
       serverRecordPath(),
@@ -1539,6 +1557,7 @@ export class ReviewServer {
       "utf8"
     );
 
+    this.telemetry?.start(() => this.resourceCounts());
     return this.port;
   }
 
@@ -1553,5 +1572,6 @@ export class ReviewServer {
       this.serverInstance.stop();
       this.serverInstance = null;
     }
+    return this.telemetry?.stop();
   }
 }
